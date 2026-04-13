@@ -14,12 +14,17 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1029.0",
     "@aws-sdk/lib-dynamodb": "^3.1029.0",
+    "next": "^14.2.35",
     "onnxruntime-node": "^1.24.3",
     "openai": "^6.34.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"
   }
