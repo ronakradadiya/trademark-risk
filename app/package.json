@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:schemas": "tsx src/schemas/__tests__/schemas.test.ts",
     "test:tools": "tsx src/tools/__tests__/tools.test.ts",

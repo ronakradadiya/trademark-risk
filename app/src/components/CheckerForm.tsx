@@ -5,14 +5,48 @@ import type { CheckRequest } from '../schemas/index.js';
 
 interface Preset {
   label: string;
+  tagline: string;
   request: CheckRequest;
 }
 
 const PRESETS: Preset[] = [
-  { label: 'BrewBox Coffee', request: { brand_name: 'BrewBox Coffee', class_code: 30 } },
-  { label: 'NovaPay', request: { brand_name: 'NovaPay', class_code: 36 } },
-  { label: 'Nike Shoes', request: { brand_name: 'Nike Shoes', class_code: 25 } },
-  { label: 'xyzzy troll mark', request: { brand_name: 'xyzzy troll mark' } },
+  {
+    label: 'Apple + AirTag Pro',
+    tagline: 'blue-chip filer, clean',
+    request: {
+      brand_name: 'AirTag Pro',
+      applicant_name: 'Apple Inc.',
+      class_code: 9,
+    },
+  },
+  {
+    label: 'Leo Stoller + EZ Profits',
+    tagline: 'famous troll filer',
+    request: {
+      brand_name: 'EZ Profits',
+      applicant_name: 'Leo Stoller',
+      class_code: 35,
+    },
+  },
+  {
+    label: 'Meridian Labs + NovaPay',
+    tagline: 'shell LLC, suspicious',
+    request: {
+      brand_name: 'NovaPay',
+      applicant_name: 'Meridian Labs LLC',
+      domain_name: 'novapay.io',
+      class_code: 36,
+    },
+  },
+  {
+    label: 'Nike + Nike Runners',
+    tagline: 'established owner, same class',
+    request: {
+      brand_name: 'Nike Runners',
+      applicant_name: 'Nike Inc.',
+      class_code: 25,
+    },
+  },
 ];
 
 interface Props {
@@ -22,14 +56,16 @@ interface Props {
 
 export function CheckerForm({ onSubmit, loading }: Props) {
   const [brandName, setBrandName] = useState('');
+  const [applicantName, setApplicantName] = useState('');
   const [domainName, setDomainName] = useState('');
   const [classCode, setClassCode] = useState('');
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!brandName.trim()) return;
+    if (!brandName.trim() || !applicantName.trim()) return;
     const req: CheckRequest = {
       brand_name: brandName.trim(),
+      applicant_name: applicantName.trim(),
       ...(domainName.trim() ? { domain_name: domainName.trim() } : {}),
       ...(classCode ? { class_code: Number(classCode) } : {}),
     };
@@ -38,26 +74,42 @@ export function CheckerForm({ onSubmit, loading }: Props) {
 
   const applyPreset = (p: Preset) => {
     setBrandName(p.request.brand_name);
+    setApplicantName(p.request.applicant_name);
     setDomainName(p.request.domain_name ?? '');
     setClassCode(p.request.class_code ? String(p.request.class_code) : '');
   };
 
   return (
     <section className="panel">
-      <h2>Check a brand</h2>
+      <h2>Due-diligence check</h2>
       <form onSubmit={handleSubmit}>
-        <div style={{ marginBottom: 12 }}>
-          <label htmlFor="brand">Brand name</label>
-          <input
-            id="brand"
-            type="text"
-            value={brandName}
-            onChange={(e) => setBrandName(e.target.value)}
-            placeholder="e.g. BrewBox Coffee"
-            maxLength={200}
-            required
-            aria-label="brand name"
-          />
+        <div className="row" style={{ marginBottom: 12 }}>
+          <div>
+            <label htmlFor="applicant">Applicant / filer</label>
+            <input
+              id="applicant"
+              type="text"
+              value={applicantName}
+              onChange={(e) => setApplicantName(e.target.value)}
+              placeholder="e.g. Meridian Labs LLC"
+              maxLength={200}
+              required
+              aria-label="applicant name"
+            />
+          </div>
+          <div>
+            <label htmlFor="brand">Brand they want to file</label>
+            <input
+              id="brand"
+              type="text"
+              value={brandName}
+              onChange={(e) => setBrandName(e.target.value)}
+              placeholder="e.g. NovaPay"
+              maxLength={200}
+              required
+              aria-label="brand name"
+            />
+          </div>
         </div>
         <div className="row" style={{ marginBottom: 16 }}>
           <div>
@@ -67,7 +119,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               type="text"
               value={domainName}
               onChange={(e) => setDomainName(e.target.value)}
-              placeholder="brewbox.com"
+              placeholder="novapay.io"
             />
           </div>
           <div>
@@ -79,15 +131,28 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               max={45}
               value={classCode}
               onChange={(e) => setClassCode(e.target.value)}
-              placeholder="30"
+              placeholder="36"
             />
           </div>
         </div>
-        <button type="submit" disabled={loading || !brandName.trim()}>
-          {loading ? 'Checking…' : 'Run risk check'}
+        <button
+          type="submit"
+          disabled={loading || !brandName.trim() || !applicantName.trim()}
+        >
+          {loading ? 'Investigating…' : 'Run due-diligence check'}
         </button>
       </form>
       <div className="presets">
+        <div
+          style={{
+            color: 'var(--muted)',
+            fontSize: 12,
+            marginBottom: 6,
+            width: '100%',
+          }}
+        >
+          Demo scenarios
+        </div>
         {PRESETS.map((p) => (
           <button
             type="button"
@@ -95,6 +160,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
             className="pill"
             onClick={() => applyPreset(p)}
             disabled={loading}
+            title={p.tagline}
           >
             {p.label}
           </button>

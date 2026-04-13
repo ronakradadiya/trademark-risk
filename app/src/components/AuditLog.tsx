@@ -16,6 +16,7 @@ export function AuditLog({ entries }: Props) {
         <table className="audit-table">
           <thead>
             <tr>
+              <th>Applicant</th>
               <th>Brand</th>
               <th>Verdict</th>
               <th>Confidence</th>
@@ -26,6 +27,7 @@ export function AuditLog({ entries }: Props) {
           <tbody>
             {entries.map((v, i) => (
               <tr key={`${v.brand}-${v.checked_at}-${i}`}>
+                <td style={{ color: 'var(--muted)' }}>{v.applicant}</td>
                 <td>{v.brand}</td>
                 <td>
                   <span className={`verdict-badge verdict-${v.verdict}`}>
