@@ -7,9 +7,14 @@
     "typecheck": "tsc --noEmit",
     "test:schemas": "tsx src/schemas/__tests__/schemas.test.ts",
     "test:tools": "tsx src/tools/__tests__/tools.test.ts",
-    "test": "npm run test:schemas && npm run test:tools"
+    "test:core": "tsx src/lib/__tests__/core.test.ts",
+    "test": "npm run test:schemas && npm run test:tools && npm run test:core"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1029.0",
+    "@aws-sdk/lib-dynamodb": "^3.1029.0",
+    "onnxruntime-node": "^1.24.3",
+    "openai": "^6.34.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

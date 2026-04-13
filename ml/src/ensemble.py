@@ -108,6 +108,40 @@ def build_ensemble():
     return ensemble, threshold, y_val, ensemble_val_prob
 
 
+def _strip_catboost_zipmap(path):
+    """Replace CatBoost's ZipMap Map output with a plain [N,2] FLOAT tensor.
+
+    CatBoost's native ONNX export emits:
+        TreeEnsembleClassifier -> probability_tensor -> ZipMap -> probabilities (Map)
+    onnxruntime-node can't read Map outputs, so we drop ZipMap and expose
+    probability_tensor directly.
+    """
+    import onnx
+    from onnx import helper, TensorProto
+
+    m = onnx.load(path)
+    g = m.graph
+
+    zipmap_nodes = [n for n in g.node if n.op_type == 'ZipMap']
+    if not zipmap_nodes:
+        return  # already stripped
+
+    inner_name = zipmap_nodes[0].input[0]  # probability_tensor
+    for n in zipmap_nodes:
+        g.node.remove(n)
+
+    old_outputs = list(g.output)
+    del g.output[:]
+    for o in old_outputs:
+        if o.type.HasField('sequence_type') or o.type.HasField('map_type'):
+            continue
+        g.output.append(o)
+    g.output.append(helper.make_tensor_value_info(inner_name, TensorProto.FLOAT, [None, 2]))
+
+    onnx.checker.check_model(m)
+    onnx.save(m, path)
+
+
 def tune_threshold(y_true, y_prob):
     """Find threshold that maximizes F1 while keeping recall >= 0.85."""
     print(f"{'Threshold':>12} {'Precision':>12} {'Recall':>10} {'F1':>10}")
@@ -143,45 +177,63 @@ def tune_threshold(y_true, y_prob):
 
 
 def export_onnx(xgb_model, cat_model, meta_lr, X_sample):
-    """Export the ensemble pipeline to ONNX."""
-    from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import FloatTensorType
+    """Export the ensemble pipeline to ONNX.
 
-    # We export each component separately, then combine in inference
-    # Export XGBoost
-    from onnxmltools import convert_xgboost
-    from onnxmltools.convert.common.data_types import FloatTensorType as OnnxFloatTensorType
+    IMPORTANT: outputs must be plain tensors, not ZipMap/sequence-of-map, because
+    onnxruntime-node (used by the TypeScript agent in app/) does not support
+    non-tensor types. We disable ZipMap for sklearn-converted models and strip
+    it from CatBoost's native export via graph surgery.
+    """
+    from skl2onnx import convert_sklearn, update_registered_converter
+    from skl2onnx.common.shape_calculator import calculate_linear_classifier_output_shapes
+    from skl2onnx.common.data_types import FloatTensorType
+    from onnxmltools.convert.xgboost.operator_converters.XGBoost import convert_xgboost as xgb_converter
+    from xgboost import XGBClassifier
+    import onnx
+    from onnx import helper, TensorProto
 
     n_features = len(FEATURE_COLS)
+    target_opset = {'': 12, 'ai.onnx.ml': 3}
 
-    # XGBoost to ONNX
-    xgb_onnx = convert_xgboost(
+    # Register XGBClassifier so skl2onnx can convert it with zipmap=False
+    update_registered_converter(
+        XGBClassifier, 'XGBoostXGBClassifier',
+        calculate_linear_classifier_output_shapes,
+        xgb_converter,
+        options={'nocl': [True, False], 'zipmap': [True, False, 'columns']},
+    )
+
+    # XGBoost to ONNX (no ZipMap)
+    xgb_onnx = convert_sklearn(
         xgb_model,
-        initial_types=[('input', OnnxFloatTensorType([None, n_features]))],
-        target_opset=12
+        initial_types=[('input', FloatTensorType([None, n_features]))],
+        target_opset=target_opset,
+        options={id(xgb_model): {'zipmap': False}},
     )
     xgb_onnx_path = os.path.join(MODELS_DIR, 'xgboost.onnx')
     with open(xgb_onnx_path, 'wb') as f:
         f.write(xgb_onnx.SerializeToString())
-    print(f"  XGBoost ONNX saved to {xgb_onnx_path}")
+    print(f"  XGBoost ONNX saved to {xgb_onnx_path} (zipmap disabled)")
 
-    # Meta LR to ONNX
+    # Meta LR to ONNX (no ZipMap)
     meta_onnx = convert_sklearn(
         meta_lr,
         initial_types=[('meta_input', FloatTensorType([None, 2]))],
-        target_opset=12
+        target_opset=target_opset,
+        options={id(meta_lr): {'zipmap': False}},
     )
     meta_onnx_path = os.path.join(MODELS_DIR, 'meta_lr.onnx')
     with open(meta_onnx_path, 'wb') as f:
         f.write(meta_onnx.SerializeToString())
-    print(f"  Meta LR ONNX saved to {meta_onnx_path}")
+    print(f"  Meta LR ONNX saved to {meta_onnx_path} (zipmap disabled)")
 
-    # CatBoost to ONNX — CatBoost has native ONNX export
+    # CatBoost to ONNX — native export always emits ZipMap; strip it.
     cat_onnx_path = os.path.join(MODELS_DIR, 'catboost.onnx')
     cat_model.save_model(cat_onnx_path, format='onnx',
                          export_parameters={'onnx_domain': 'ai.catboost',
                                             'onnx_model_version': 1})
-    print(f"  CatBoost ONNX saved to {cat_onnx_path}")
+    _strip_catboost_zipmap(cat_onnx_path)
+    print(f"  CatBoost ONNX saved to {cat_onnx_path} (zipmap stripped)")
 
     # Also save a combined pipeline info for inference
     pipeline_info = {
@@ -214,23 +266,18 @@ def validate_onnx_parity(ensemble, X_sample):
 
     X_float = X_sample.astype(np.float32)
 
-    # XGBoost ONNX
-    xgb_onnx_out = xgb_session.run(None, {'input': X_float})
-    xgb_onnx_probs = np.array([p[1] for p in xgb_onnx_out[1]])
+    def _class1(outs):
+        # Post-zipmap-strip: every model emits a [N, 2] probability tensor
+        for t in outs:
+            if hasattr(t, 'shape') and len(t.shape) == 2 and t.shape[1] == 2:
+                return t[:, 1]
+        raise RuntimeError(f'no [N,2] tensor in outputs: {[type(o).__name__ for o in outs]}')
 
-    # CatBoost ONNX
-    cat_input_name = cat_session.get_inputs()[0].name
-    cat_onnx_out = cat_session.run(None, {cat_input_name: X_float})
-    # CatBoost ONNX output format varies — handle both
-    if len(cat_onnx_out) > 1:
-        cat_onnx_probs = np.array([p[1] for p in cat_onnx_out[1]])
-    else:
-        cat_onnx_probs = cat_onnx_out[0][:, 1] if cat_onnx_out[0].ndim > 1 else cat_onnx_out[0]
+    xgb_onnx_probs = _class1(xgb_session.run(None, {xgb_session.get_inputs()[0].name: X_float}))
+    cat_onnx_probs = _class1(cat_session.run(None, {cat_session.get_inputs()[0].name: X_float}))
 
-    # Meta LR ONNX
     meta_onnx_input = np.column_stack([xgb_onnx_probs, cat_onnx_probs]).astype(np.float32)
-    meta_onnx_out = meta_session.run(None, {'meta_input': meta_onnx_input})
-    onnx_probs = np.array([p[1] for p in meta_onnx_out[1]])
+    onnx_probs = _class1(meta_session.run(None, {meta_session.get_inputs()[0].name: meta_onnx_input}))
     onnx_time = time.time() - start
 
     # Parity check
