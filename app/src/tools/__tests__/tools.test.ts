@@ -3,11 +3,13 @@ import { checkUsptoMarks } from '../check_uspto_marks.js';
 import { checkDomainAge } from '../check_domain_age.js';
 import { webSearch } from '../web_search.js';
 import { checkAttorney } from '../check_attorney.js';
+import { lookupApplicantHistory } from '../lookup_applicant_history.js';
 import {
   CheckUsptoMarksOutputSchema,
   CheckDomainAgeOutputSchema,
   WebSearchOutputSchema,
   CheckAttorneyOutputSchema,
+  ApplicantHistorySchema,
 } from '../../schemas/index.js';
 
 let passed = 0;
@@ -304,6 +306,92 @@ async function main() {
       { fetchImpl: erroringFetch('dns fail'), url: 'https://example.test/oed' }
     );
     assert.equal(r.ok, false);
+  });
+
+  console.log('\nlookup_applicant_history');
+
+  await test('returns fixture for known blue-chip applicant', async () => {
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'Apple Inc.' },
+      { disableLive: true }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    ApplicantHistorySchema.parse(r.data);
+    assert.equal(r.data.source, 'fixture');
+    assert.equal(r.data.found, true);
+    assert.ok(r.data.filing_count_total > 10000);
+    assert.ok(r.data.abandonment_rate < 0.1);
+  });
+
+  await test('returns fixture for known troll applicant', async () => {
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'leo stoller' },
+      { disableLive: true }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.source, 'fixture');
+    assert.ok(r.data.abandonment_rate > 0.5);
+    assert.equal(r.data.attorney_of_record, null);
+  });
+
+  await test('normalizes punctuation when matching fixtures', async () => {
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'NIKE, INC' },
+      { disableLive: true }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.source, 'fixture');
+    assert.ok(r.data.found);
+  });
+
+  await test('returns unknown-applicant shape when live disabled and no fixture', async () => {
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'Nonexistent Holdings ZZZ' },
+      { disableLive: true }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.source, 'unknown');
+    assert.equal(r.data.found, false);
+    assert.equal(r.data.filing_count_total, 0);
+  });
+
+  await test('derives stats from live response when no fixture', async () => {
+    const fetchImpl = mockFetch(() => ({
+      status: 200,
+      body: JSON.stringify({
+        total: 4,
+        results: [
+          { serialNumber: '1', filingDate: '2025-01-01', abandoned: true },
+          { serialNumber: '2', filingDate: '2025-06-10', abandoned: false },
+          { serialNumber: '3', filingDate: '2024-03-01', cancelled: true },
+          { serialNumber: '4', filingDate: '2022-11-15', abandoned: false },
+        ],
+      }),
+    }));
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'Somename Holdings' },
+      { fetchImpl, baseUrl: 'https://example.test/owner' }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    ApplicantHistorySchema.parse(r.data);
+    assert.equal(r.data.source, 'live');
+    assert.equal(r.data.filing_count_total, 4);
+    assert.ok(r.data.abandonment_rate > 0 && r.data.abandonment_rate < 1);
+  });
+
+  await test('falls back to unknown-applicant on network error for non-fixture', async () => {
+    const r = await lookupApplicantHistory(
+      { applicant_name: 'Unknown Co' },
+      { fetchImpl: erroringFetch('dns fail'), baseUrl: 'https://example.test/owner' }
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.source, 'unknown');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

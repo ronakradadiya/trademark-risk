@@ -1,6 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { handleCheck } from '../check.js';
-import { VerdictSchema, type MLPrediction } from '../../schemas/index.js';
+import {
+  VerdictSchema,
+  type MLPrediction,
+  type ApplicantHistory,
+} from '../../schemas/index.js';
 import type { FeatureVector } from '../classifier.js';
 import type { AuditStore } from '../dynamo.js';
 
@@ -86,28 +90,53 @@ const stubTool = (async () => ({
   latency_ms: 1,
 })) as unknown as typeof import('../../tools/check_uspto_marks.js').checkUsptoMarks;
 
+const fakeHistory: ApplicantHistory = {
+  applicant_name: 'Acme Co',
+  found: true,
+  filing_count_total: 5,
+  filing_count_2yr: 2,
+  abandonment_rate: 0.1,
+  cancellation_rate: 0.0,
+  first_filing_date: '2022-01-01',
+  is_individual: false,
+  is_foreign: false,
+  attorney_of_record: 'Jane Doe',
+  attorney_case_count: 200,
+  attorney_cancellation_rate: 0.02,
+  source: 'fixture',
+};
+
 function baseDeps() {
   return {
     classifier: stubClassifier(0.5),
+    applicantHistory: fakeHistory,
     openai: makeFakeOpenAI(fakeVerdict) as unknown as import('openai').default,
     tools: { check_uspto_marks: stubTool },
   };
+}
+
+function req(brand: string, applicant = 'Acme Co'): {
+  brand_name: string;
+  applicant_name: string;
+} {
+  return { brand_name: brand, applicant_name: applicant };
 }
 
 async function main() {
   console.log('handleCheck');
 
   await test('valid body returns 200 with parsable verdict', async () => {
-    const res = await handleCheck({ brand_name: 'BrewBox Coffee' }, baseDeps());
+    const res = await handleCheck(req('BrewBox Coffee'), baseDeps());
     assert.equal(res.status, 200);
     if (res.status !== 200) throw new Error('unreachable');
     VerdictSchema.parse(res.verdict);
     assert.equal(res.verdict.brand, 'BrewBox Coffee');
+    assert.equal(res.verdict.applicant, 'Acme Co');
     assert.ok(['safe', 'review', 'high_risk'].includes(res.verdict.verdict));
   });
 
   await test('response includes all 5 policies', async () => {
-    const res = await handleCheck({ brand_name: 'BrewBox Coffee' }, baseDeps());
+    const res = await handleCheck(req('BrewBox Coffee'), baseDeps());
     if (res.status !== 200) throw new Error('unreachable');
     for (const k of ['P1', 'P2', 'P3', 'P4', 'P5'] as const) {
       assert.ok(res.verdict.policies[k]);
@@ -115,17 +144,22 @@ async function main() {
   });
 
   await test('empty brand_name returns 400 (not 500)', async () => {
-    const res = await handleCheck({ brand_name: '' }, baseDeps());
+    const res = await handleCheck({ brand_name: '', applicant_name: 'Acme' }, baseDeps());
     assert.equal(res.status, 400);
   });
 
   await test('missing brand_name returns 400', async () => {
-    const res = await handleCheck({}, baseDeps());
+    const res = await handleCheck({ applicant_name: 'Acme' }, baseDeps());
+    assert.equal(res.status, 400);
+  });
+
+  await test('missing applicant_name returns 400', async () => {
+    const res = await handleCheck({ brand_name: 'BrewBox' }, baseDeps());
     assert.equal(res.status, 400);
   });
 
   await test('brand_name over 200 chars returns 400', async () => {
-    const res = await handleCheck({ brand_name: 'x'.repeat(201) }, baseDeps());
+    const res = await handleCheck(req('x'.repeat(201)), baseDeps());
     assert.equal(res.status, 400);
   });
 
@@ -147,10 +181,7 @@ async function main() {
       get: async () => null,
       listRecent: async () => [],
     };
-    const res = await handleCheck(
-      { brand_name: 'BrewBox Coffee' },
-      { ...baseDeps(), auditStore }
-    );
+    const res = await handleCheck(req('BrewBox Coffee'), { ...baseDeps(), auditStore });
     assert.equal(res.status, 200);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]!.brand, 'BrewBox Coffee');
@@ -162,10 +193,7 @@ async function main() {
       get: async () => null,
       listRecent: async () => [],
     };
-    const res = await handleCheck(
-      { brand_name: 'BrewBox Coffee' },
-      { ...baseDeps(), auditStore }
-    );
+    const res = await handleCheck(req('BrewBox Coffee'), { ...baseDeps(), auditStore });
     assert.equal(res.status, 200);
   });
 
@@ -175,19 +203,19 @@ async function main() {
         throw new Error('onnx blew up');
       },
     };
-    const res = await handleCheck(
-      { brand_name: 'BrewBox Coffee' },
-      { ...baseDeps(), classifier: crashingClassifier }
-    );
+    const res = await handleCheck(req('BrewBox Coffee'), {
+      ...baseDeps(),
+      classifier: crashingClassifier,
+    });
     assert.equal(res.status, 500);
   });
 
   await test('concurrent requests do not interfere', async () => {
     const deps = baseDeps();
     const results = await Promise.all([
-      handleCheck({ brand_name: 'Brand A' }, deps),
-      handleCheck({ brand_name: 'Brand B' }, deps),
-      handleCheck({ brand_name: 'Brand C' }, deps),
+      handleCheck(req('Brand A'), deps),
+      handleCheck(req('Brand B'), deps),
+      handleCheck(req('Brand C'), deps),
     ]);
     for (const r of results) {
       assert.equal(r.status, 200);

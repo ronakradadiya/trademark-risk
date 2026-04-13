@@ -16,6 +16,7 @@ import {
   AuditRecordSchema,
   type Verdict,
   type MLPrediction,
+  type ApplicantHistory,
 } from '../../schemas/index.js';
 
 let passed = 0;
@@ -192,11 +193,29 @@ async function main() {
     return f;
   }
 
+  const sampleHistory: ApplicantHistory = {
+    applicant_name: 'BrewBox Holdings LLC',
+    found: true,
+    filing_count_total: 3,
+    filing_count_2yr: 1,
+    abandonment_rate: 0.1,
+    cancellation_rate: 0.0,
+    first_filing_date: '2023-06-01',
+    is_individual: false,
+    is_foreign: false,
+    attorney_of_record: 'Jane Doe',
+    attorney_case_count: 100,
+    attorney_cancellation_rate: 0.02,
+    source: 'fixture',
+  };
+
   const sampleVerdict: Verdict = VerdictSchema.parse({
     brand: 'BrewBox Coffee',
+    applicant: 'BrewBox Holdings LLC',
     verdict: 'review',
     overall_confidence: 0.5,
     ml: { score: 0.4, tier: 'mid', high_threshold: 0.7, low_threshold: 0.08, model_version: 'v4' },
+    applicant_history: sampleHistory,
     source: 'ml_and_agent',
     policies: {
       P1: { triggered: false, confidence: 0.1, reason: 'clean' },
@@ -270,27 +289,19 @@ async function main() {
     };
   }
 
-  await test('short-circuits safe when ML score < 0.3', async () => {
+  await test('short-circuits high_risk when ML filer score > 0.85', async () => {
     const verdict = await runCheck(
-      { brand_name: 'Obvious Legit Inc' },
-      baseFeatures(),
-      { classifier: stubClassifier(0.05) }
-    );
-    VerdictSchema.parse(verdict);
-    assert.equal(verdict.verdict, 'safe');
-    assert.equal(verdict.source, 'ml_only');
-    assert.equal(verdict.tools_used.length, 0);
-  });
-
-  await test('short-circuits high_risk when ML score > 0.85', async () => {
-    const verdict = await runCheck(
-      { brand_name: 'Troll Shop LLC' },
-      baseFeatures(),
-      { classifier: stubClassifier(0.95) }
+      { brand_name: 'Troll Shop LLC', applicant_name: 'Known Troll LLC' },
+      {
+        classifier: stubClassifier(0.95),
+        applicantHistory: sampleHistory,
+      }
     );
     VerdictSchema.parse(verdict);
     assert.equal(verdict.verdict, 'high_risk');
     assert.equal(verdict.source, 'ml_only');
+    assert.equal(verdict.applicant, 'Known Troll LLC');
+    assert.ok(verdict.tools_used.includes('lookup_applicant_history'));
   });
 
   // Fake OpenAI client — two-turn: tool call, then final JSON verdict.
@@ -360,10 +371,14 @@ async function main() {
     })) as unknown as typeof import('../../tools/check_uspto_marks.js').checkUsptoMarks;
 
     const verdict = await runCheck(
-      { brand_name: 'BrewBox Coffee', class_code: 30 },
-      baseFeatures(),
+      {
+        brand_name: 'BrewBox Coffee',
+        applicant_name: 'BrewBox Holdings LLC',
+        class_code: 30,
+      },
       {
         classifier: stubClassifier(0.5),
+        applicantHistory: sampleHistory,
         openai: makeFakeOpenAI({ finalJson: fakeFinalVerdict }) as unknown as import('openai').default,
         tools: { check_uspto_marks: stubTool },
       }
@@ -371,14 +386,38 @@ async function main() {
     VerdictSchema.parse(verdict);
     assert.equal(verdict.source, 'ml_and_agent');
     assert.equal(verdict.verdict, 'review');
+    assert.equal(verdict.applicant, 'BrewBox Holdings LLC');
+    assert.equal(verdict.applicant_history?.source, 'fixture');
     for (const k of ['P1', 'P2', 'P3', 'P4', 'P5'] as const) {
       assert.ok(verdict.policies[k]);
       assert.equal(typeof verdict.policies[k].triggered, 'boolean');
       assert.equal(typeof verdict.policies[k].confidence, 'number');
       assert.equal(typeof verdict.policies[k].reason, 'string');
     }
+    assert.ok(verdict.tools_used.includes('lookup_applicant_history'));
     assert.ok(verdict.tools_used.includes('check_uspto_marks'));
-    assert.equal(verdict.trace.length, 1);
+    assert.equal(verdict.trace.length, 2); // pre-trace (lookup) + 1 agent tool call
+  });
+
+  await test('agent loop runs even when ML filer score is very low (no low short-circuit)', async () => {
+    const stubTool = (async () => ({
+      ok: true,
+      data: { query: 'Clean Brand', total: 0, results: [] },
+      latency_ms: 5,
+    })) as unknown as typeof import('../../tools/check_uspto_marks.js').checkUsptoMarks;
+
+    const verdict = await runCheck(
+      { brand_name: 'Clean Brand', applicant_name: 'First-Time Founder LLC' },
+      {
+        classifier: stubClassifier(0.05),
+        applicantHistory: sampleHistory,
+        openai: makeFakeOpenAI({ finalJson: fakeFinalVerdict }) as unknown as import('openai').default,
+        tools: { check_uspto_marks: stubTool },
+      }
+    );
+    VerdictSchema.parse(verdict);
+    assert.equal(verdict.source, 'ml_and_agent');
+    assert.ok(verdict.tools_used.includes('check_uspto_marks'));
   });
 
   await test('agent continues when a tool fails mid-run', async () => {
@@ -389,10 +428,14 @@ async function main() {
     })) as unknown as typeof import('../../tools/check_domain_age.js').checkDomainAge;
 
     const verdict = await runCheck(
-      { brand_name: 'BrewBox Coffee', domain_name: 'brewbox.com' },
-      baseFeatures(),
+      {
+        brand_name: 'BrewBox Coffee',
+        applicant_name: 'BrewBox Holdings LLC',
+        domain_name: 'brewbox.com',
+      },
       {
         classifier: stubClassifier(0.5),
+        applicantHistory: sampleHistory,
         openai: makeFakeOpenAI({
           finalJson: fakeFinalVerdict,
           toolName: 'check_domain_age',
@@ -401,8 +444,9 @@ async function main() {
       }
     );
     VerdictSchema.parse(verdict);
-    assert.equal(verdict.trace.length, 1);
-    assert.ok(verdict.trace[0]!.error !== null);
+    // Trace: [0] lookup pre-step, [1] failed check_domain_age
+    assert.equal(verdict.trace.length, 2);
+    assert.ok(verdict.trace[1]!.error !== null);
     assert.equal(verdict.verdict, 'review');
   });
 

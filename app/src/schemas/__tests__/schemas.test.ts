@@ -6,6 +6,7 @@ import {
   MLPredictionSchema,
   PolicyResultSchema,
   AuditRecordSchema,
+  ApplicantHistorySchema,
   CheckUsptoMarksOutputSchema,
   CheckDomainAgeOutputSchema,
   CheckAttorneyOutputSchema,
@@ -13,6 +14,7 @@ import {
   type CheckRequest,
   type Verdict,
   type AuditRecord,
+  type ApplicantHistory,
 } from '../index.js';
 
 let passed = 0;
@@ -42,12 +44,17 @@ function expectThrows(fn: () => unknown, schemaName: string): void {
 
 console.log('CheckRequestSchema');
 test('accepts minimal valid input', () => {
-  const r: CheckRequest = CheckRequestSchema.parse({ brand_name: 'Nike' });
+  const r: CheckRequest = CheckRequestSchema.parse({
+    brand_name: 'Nike',
+    applicant_name: 'Nike Inc.',
+  });
   assert.equal(r.brand_name, 'Nike');
+  assert.equal(r.applicant_name, 'Nike Inc.');
 });
 test('accepts full valid input', () => {
   CheckRequestSchema.parse({
     brand_name: 'BrewBox Coffee',
+    applicant_name: 'BrewBox Holdings LLC',
     domain_name: 'brewbox.com',
     attorney_name: 'Jane Doe',
     attorney_bar_number: 'CA-12345',
@@ -55,16 +62,31 @@ test('accepts full valid input', () => {
   });
 });
 test('rejects empty brand_name', () => {
-  expectThrows(() => CheckRequestSchema.parse({ brand_name: '' }), 'CheckRequest');
+  expectThrows(
+    () => CheckRequestSchema.parse({ brand_name: '', applicant_name: 'Nike Inc.' }),
+    'CheckRequest'
+  );
+});
+test('rejects missing applicant_name', () => {
+  expectThrows(() => CheckRequestSchema.parse({ brand_name: 'Nike' }), 'CheckRequest');
+});
+test('rejects empty applicant_name', () => {
+  expectThrows(
+    () => CheckRequestSchema.parse({ brand_name: 'Nike', applicant_name: '' }),
+    'CheckRequest'
+  );
 });
 test('rejects brand_name over 200 chars', () => {
   expectThrows(
-    () => CheckRequestSchema.parse({ brand_name: 'x'.repeat(201) }),
+    () => CheckRequestSchema.parse({ brand_name: 'x'.repeat(201), applicant_name: 'A' }),
     'CheckRequest'
   );
 });
 test('rejects class_code out of range', () => {
-  expectThrows(() => CheckRequestSchema.parse({ brand_name: 'A', class_code: 99 }), 'CheckRequest');
+  expectThrows(
+    () => CheckRequestSchema.parse({ brand_name: 'A', applicant_name: 'B', class_code: 99 }),
+    'CheckRequest'
+  );
 });
 
 console.log('\nMLPredictionSchema');
@@ -115,8 +137,25 @@ test('rejects confidence outside 0-1', () => {
   );
 });
 
+const validHistory: ApplicantHistory = {
+  applicant_name: 'BrewBox Holdings LLC',
+  found: true,
+  filing_count_total: 3,
+  filing_count_2yr: 1,
+  abandonment_rate: 0.1,
+  cancellation_rate: 0.0,
+  first_filing_date: '2023-06-01',
+  is_individual: false,
+  is_foreign: false,
+  attorney_of_record: 'Jane Doe',
+  attorney_case_count: 120,
+  attorney_cancellation_rate: 0.02,
+  source: 'fixture',
+};
+
 const validVerdict: Verdict = {
   brand: 'BrewBox Coffee',
+  applicant: 'BrewBox Holdings LLC',
   verdict: 'review',
   overall_confidence: 0.55,
   ml: {
@@ -126,6 +165,7 @@ const validVerdict: Verdict = {
     low_threshold: 0.08,
     model_version: 'v4',
   },
+  applicant_history: validHistory,
   source: 'ml_and_agent',
   policies: {
     P1: { triggered: false, confidence: 0.1, reason: 'no similar marks' },
@@ -167,6 +207,34 @@ test('rejects non-ISO checked_at', () => {
   expectThrows(
     () => VerdictSchema.parse({ ...validVerdict, checked_at: 'yesterday' }),
     'Verdict'
+  );
+});
+
+console.log('\nApplicantHistorySchema');
+test('accepts valid applicant history', () => {
+  ApplicantHistorySchema.parse(validHistory);
+});
+test('accepts unknown-applicant shape', () => {
+  ApplicantHistorySchema.parse({
+    applicant_name: 'Unknown Co',
+    found: false,
+    filing_count_total: 0,
+    filing_count_2yr: 0,
+    abandonment_rate: 0,
+    cancellation_rate: 0,
+    first_filing_date: null,
+    is_individual: false,
+    is_foreign: false,
+    attorney_of_record: null,
+    attorney_case_count: 0,
+    attorney_cancellation_rate: 0,
+    source: 'unknown',
+  });
+});
+test('rejects abandonment_rate > 1', () => {
+  expectThrows(
+    () => ApplicantHistorySchema.parse({ ...validHistory, abandonment_rate: 1.2 }),
+    'ApplicantHistory'
   );
 });
 

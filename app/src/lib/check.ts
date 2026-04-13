@@ -5,13 +5,10 @@ import {
   type Verdict,
 } from '../schemas/index.js';
 import { runCheck, type AgentDeps } from './agent.js';
-import { buildFeatures } from './features.js';
-import type { FeatureVector } from './classifier.js';
 import type { AuditStore } from './dynamo.js';
 
 export interface HandleCheckDeps extends AgentDeps {
   auditStore?: AuditStore | null;
-  featureOverrides?: (req: CheckRequest) => Partial<FeatureVector>;
 }
 
 export type HandleCheckResult =
@@ -36,12 +33,9 @@ export async function handleCheck(
     return { status: 400, error: { message: 'invalid request body' } };
   }
 
-  const overrides = deps.featureOverrides ? deps.featureOverrides(req) : {};
-  const features = buildFeatures(overrides);
-
   let verdict: Verdict;
   try {
-    verdict = await runCheck(req, features, deps);
+    verdict = await runCheck(req, deps);
   } catch (e) {
     return {
       status: 500,

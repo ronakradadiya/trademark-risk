@@ -10,16 +10,18 @@ import {
   type PolicyResult,
   type AgentStep,
   type ToolName,
+  type ApplicantHistory,
   POLICY_KEYS,
 } from '../schemas/index.js';
 import { POLICIES, POLICY_LIST } from './policies.js';
 import type { Classifier, FeatureVector } from './classifier.js';
+import { BASELINE_MARK_FEATURES, applicantToFeatures } from './features.js';
 import { checkUsptoMarks } from '../tools/check_uspto_marks.js';
 import { checkDomainAge } from '../tools/check_domain_age.js';
 import { webSearch } from '../tools/web_search.js';
 import { checkAttorney } from '../tools/check_attorney.js';
+import { lookupApplicantHistory } from '../tools/lookup_applicant_history.js';
 
-const AGENT_LOW = 0.3;   // ml_confidence < AGENT_LOW → short-circuit safe
 const AGENT_HIGH = 0.85; // ml_confidence > AGENT_HIGH → short-circuit high_risk
 const MAX_AGENT_STEPS = 10;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o';
@@ -29,18 +31,17 @@ export interface AgentDeps {
   openai?: OpenAI;
   model?: string;
   now?: () => Date;
+  /** Pre-resolved applicant history; if set, skips the lookup tool call. */
+  applicantHistory?: ApplicantHistory;
+  /** Test hook to inject feature overrides after history extraction. */
+  featureOverrides?: Partial<FeatureVector>;
   tools?: Partial<{
+    lookup_applicant_history: typeof lookupApplicantHistory;
     check_uspto_marks: typeof checkUsptoMarks;
     check_domain_age: typeof checkDomainAge;
     web_search: typeof webSearch;
     check_attorney: typeof checkAttorney;
   }>;
-}
-
-function verdictFromScore(score: number): Verdict['verdict'] {
-  if (score < AGENT_LOW) return 'safe';
-  if (score > AGENT_HIGH) return 'high_risk';
-  return 'review';
 }
 
 function emptyPolicies(reason: string): PolicyBundle {
@@ -112,11 +113,11 @@ function toolSpecs(): OpenAI.Chat.Completions.ChatCompletionTool[] {
 
 function systemPrompt(): string {
   const policies = POLICY_LIST.map((p) => `${p.key} — ${p.name}: ${p.description}`).join('\n\n');
-  return `You are a trademark risk investigator helping small businesses determine if a brand name is safe to trademark before spending money on branding and legal fees.
+  return `You are a trademark due-diligence analyst. A law firm, investor, or brand protection team has given you an applicant (the filer) and a brand they want to trademark. Your job is to investigate whether this is a safe filing.
 
-You have 4 tools: check_uspto_marks, check_domain_age, web_search, check_attorney.
+The system has already pulled the applicant's USPTO history and scored them with an ML ranker — you will see that score and the raw history in the user message. Use it as a prior, not a verdict. Your job is to investigate the BRAND.
 
-Investigate the brand name thoroughly. Call tools in whatever order makes sense based on what you find. You may call the same tool multiple times with different queries. Do NOT ask the user questions — act autonomously.
+You have 4 investigation tools: check_uspto_marks, check_domain_age, web_search, check_attorney. Call them in whatever order makes sense based on what you find. You may call the same tool multiple times with different queries. Do NOT ask the user questions — act autonomously.
 
 Then evaluate each of the 5 policies below and return a structured verdict.
 
@@ -134,7 +135,7 @@ Return JSON ONLY in this exact shape (no prose outside the JSON):
     "P4": { "triggered": boolean, "confidence": number, "reason": string },
     "P5": { "triggered": boolean, "confidence": number, "reason": string }
   },
-  "summary": "one sentence plain English"
+  "summary": "one sentence plain English recommendation the analyst can paste into a memo"
 }`;
 }
 
@@ -165,51 +166,92 @@ function parseAgentJson(raw: string): ParsedAgentJson {
   };
 }
 
-export async function runCheck(
-  request: CheckRequest,
-  features: FeatureVector,
-  deps: AgentDeps
-): Promise<Verdict> {
+export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<Verdict> {
   const req = CheckRequestSchema.parse(request);
   const now = (deps.now ?? (() => new Date()))();
 
+  const applicantHistory = await resolveApplicantHistory(req, deps);
+  const features: FeatureVector = {
+    ...BASELINE_MARK_FEATURES,
+    ...applicantToFeatures(applicantHistory, now),
+    ...(deps.featureOverrides ?? {}),
+  } as FeatureVector;
+
   const ml: MLPrediction = await deps.classifier.predict(features);
 
-  if (ml.score < AGENT_LOW || ml.score > AGENT_HIGH) {
-    const verdict = verdictFromScore(ml.score);
-    const reason =
-      verdict === 'safe'
-        ? `ML score ${ml.score.toFixed(3)} is below short-circuit threshold ${AGENT_LOW}.`
-        : `ML score ${ml.score.toFixed(3)} exceeds short-circuit threshold ${AGENT_HIGH}.`;
+  const preTrace: AgentStep[] = [
+    {
+      step: 0,
+      tool: 'lookup_applicant_history',
+      input: { applicant_name: req.applicant_name },
+      output: applicantHistory,
+      error: null,
+      duration_ms: 0,
+    },
+  ];
+  const preTools: ToolName[] = ['lookup_applicant_history'];
+
+  if (ml.score > AGENT_HIGH) {
+    const reason = `Filer risk score ${ml.score.toFixed(3)} exceeds high-risk threshold ${AGENT_HIGH} — abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, ${applicantHistory.filing_count_2yr} filings in 24mo.`;
     return VerdictSchema.parse({
       brand: req.brand_name,
-      verdict,
+      applicant: req.applicant_name,
+      verdict: 'high_risk',
       overall_confidence: ml.score,
       ml,
+      applicant_history: applicantHistory,
       source: 'ml_only',
       policies: emptyPolicies(reason),
-      tools_used: [],
-      trace: [],
+      tools_used: preTools,
+      trace: preTrace,
       summary: reason,
       checked_at: now.toISOString(),
     });
   }
 
-  const agentResult = await runAgentLoop(req, ml, deps);
+  const agentResult = await runAgentLoop(req, ml, applicantHistory, deps);
 
   const finalConfidence = ml.score * 0.35 + agentResult.parsed.overall_confidence * 0.65;
   return VerdictSchema.parse({
     brand: req.brand_name,
+    applicant: req.applicant_name,
     verdict: agentResult.parsed.verdict,
     overall_confidence: finalConfidence,
     ml,
+    applicant_history: applicantHistory,
     source: 'ml_and_agent',
     policies: agentResult.parsed.policies,
-    tools_used: [...new Set(agentResult.toolsUsed)],
-    trace: agentResult.trace,
+    tools_used: [...new Set([...preTools, ...agentResult.toolsUsed])],
+    trace: [...preTrace, ...agentResult.trace],
     summary: agentResult.parsed.summary || `Agent verdict: ${agentResult.parsed.verdict}.`,
     checked_at: now.toISOString(),
   });
+}
+
+async function resolveApplicantHistory(
+  req: CheckRequest,
+  deps: AgentDeps
+): Promise<ApplicantHistory> {
+  if (deps.applicantHistory) return deps.applicantHistory;
+  const fn = deps.tools?.lookup_applicant_history ?? lookupApplicantHistory;
+  const r = await fn({ applicant_name: req.applicant_name });
+  if (r.ok) return r.data;
+  // Fall back to unknown-applicant shape so classifier still runs with neutral priors.
+  return {
+    applicant_name: req.applicant_name,
+    found: false,
+    filing_count_total: 0,
+    filing_count_2yr: 0,
+    abandonment_rate: 0,
+    cancellation_rate: 0,
+    first_filing_date: null,
+    is_individual: false,
+    is_foreign: false,
+    attorney_of_record: null,
+    attorney_case_count: 0,
+    attorney_cancellation_rate: 0,
+    source: 'unknown',
+  };
 }
 
 interface AgentRunResult {
@@ -221,17 +263,24 @@ interface AgentRunResult {
 async function runAgentLoop(
   req: CheckRequest,
   ml: MLPrediction,
+  applicantHistory: ApplicantHistory,
   deps: AgentDeps
 ): Promise<AgentRunResult> {
   const client = deps.openai ?? new OpenAI();
   const model = deps.model ?? DEFAULT_MODEL;
 
+  const historyLine = applicantHistory.found
+    ? `Applicant history: ${applicantHistory.filing_count_total} total filings, ${applicantHistory.filing_count_2yr} in last 24mo, abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, cancellation ${(applicantHistory.cancellation_rate * 100).toFixed(0)}%, individual=${applicantHistory.is_individual}, foreign=${applicantHistory.is_foreign}, attorney=${applicantHistory.attorney_of_record ?? 'none/pro se'}`
+    : `Applicant history: NOT FOUND in USPTO — first-time filer or shell entity`;
+
   const userMessage = [
     `Brand: ${req.brand_name}`,
+    `Applicant: ${req.applicant_name}`,
     req.class_code !== undefined ? `Class: ${req.class_code}` : null,
     req.domain_name ? `Domain: ${req.domain_name}` : null,
-    req.attorney_name ? `Attorney: ${req.attorney_name}` : null,
-    `ML risk score: ${ml.score.toFixed(3)} (tier: ${ml.tier})`,
+    req.attorney_name ? `Attorney (proposed): ${req.attorney_name}` : null,
+    historyLine,
+    `ML filer-risk score: ${ml.score.toFixed(3)} (tier: ${ml.tier})`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -338,6 +387,18 @@ async function executeTool(
           ...(typeof a.bar_number === 'string' ? { bar_number: a.bar_number } : {}),
         });
         return r.ok ? { ok: true, data: r.data } : { ok: false, error: r.error };
+      }
+      case 'lookup_applicant_history': {
+        // Applicant history is resolved before the agent loop starts; the LLM
+        // should not call this tool. If a model does, return the pre-resolved
+        // history so the agent can still reason about it in-turn.
+        return {
+          ok: false,
+          error: {
+            code: 'pre_computed',
+            message: 'lookup_applicant_history is pre-resolved; use the values already shown in the user message.',
+          },
+        };
       }
       default: {
         const _exhaust: never = name;

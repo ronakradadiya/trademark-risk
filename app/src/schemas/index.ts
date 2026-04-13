@@ -9,12 +9,35 @@ export const VERDICT_SOURCES = ['ml_only', 'ml_and_agent'] as const;
 
 export const CheckRequestSchema = z.object({
   brand_name: z.string().min(1).max(200),
+  applicant_name: z.string().min(1).max(200),
   domain_name: z.string().max(253).optional(),
   attorney_name: z.string().max(200).optional(),
   attorney_bar_number: z.string().max(50).optional(),
   class_code: z.number().int().min(1).max(45).optional(),
 });
 export type CheckRequest = z.infer<typeof CheckRequestSchema>;
+
+export const ApplicantHistorySchema = z.object({
+  applicant_name: z.string().min(1),
+  found: z.boolean(),
+  filing_count_total: z.number().int().min(0),
+  filing_count_2yr: z.number().int().min(0),
+  abandonment_rate: z.number().min(0).max(1),
+  cancellation_rate: z.number().min(0).max(1),
+  first_filing_date: z.string().nullable(),
+  is_individual: z.boolean(),
+  is_foreign: z.boolean(),
+  attorney_of_record: z.string().nullable(),
+  attorney_case_count: z.number().int().min(0),
+  attorney_cancellation_rate: z.number().min(0).max(1),
+  source: z.enum(['fixture', 'live', 'unknown']),
+});
+export type ApplicantHistory = z.infer<typeof ApplicantHistorySchema>;
+
+export const LookupApplicantInputSchema = z.object({
+  applicant_name: z.string().min(1).max(200),
+});
+export const LookupApplicantOutputSchema = ApplicantHistorySchema;
 
 export const MLPredictionSchema = z.object({
   score: z.number().min(0).max(1),
@@ -97,6 +120,7 @@ export const CheckAttorneyOutputSchema = z.object({
 });
 
 export const TOOL_NAMES = [
+  'lookup_applicant_history',
   'check_uspto_marks',
   'check_domain_age',
   'web_search',
@@ -116,9 +140,11 @@ export type AgentStep = z.infer<typeof AgentStepSchema>;
 
 export const VerdictSchema = z.object({
   brand: z.string().min(1),
+  applicant: z.string().min(1),
   verdict: z.enum(VERDICTS),
   overall_confidence: z.number().min(0).max(1),
   ml: MLPredictionSchema,
+  applicant_history: ApplicantHistorySchema.nullable(),
   source: z.enum(VERDICT_SOURCES),
   policies: PolicyBundleSchema,
   tools_used: z.array(z.enum(TOOL_NAMES)),
