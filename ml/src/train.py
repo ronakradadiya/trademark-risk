@@ -30,14 +30,10 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 FEATURE_COLS = [
     'owner_filing_count_2yr', 'owner_abandonment_rate',
     'owner_historical_cancellation_rate', 'days_since_owner_first_filing',
-    'owner_is_individual',
-    'attorney_case_count', 'attorney_cancellation_rate', 'owner_is_foreign',
-    'days_domain_to_filing', 'days_since_filing', 'days_first_use_to_filing',
-    'days_filing_to_registration',
-    'office_action_count', 'opposition_count', 'statement_of_use_filed',
-    'section_8_filed', 'has_acquired_distinctiveness', 'is_currently_active',
-    'was_abandoned', 'filing_basis',
-    'class_breadth', 'specimen_type_encoded'
+    'owner_is_individual', 'owner_is_foreign',
+    'attorney_case_count', 'attorney_cancellation_rate',
+    'days_since_filing', 'days_filing_to_registration',
+    'was_abandoned', 'is_currently_active', 'class_breadth',
 ]
 
 
