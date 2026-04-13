@@ -8,7 +8,8 @@
     "test:schemas": "tsx src/schemas/__tests__/schemas.test.ts",
     "test:tools": "tsx src/tools/__tests__/tools.test.ts",
     "test:core": "tsx src/lib/__tests__/core.test.ts",
-    "test": "npm run test:schemas && npm run test:tools && npm run test:core"
+    "test:check": "tsx src/lib/__tests__/check.test.ts",
+    "test": "npm run test:schemas && npm run test:tools && npm run test:core && npm run test:check"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1029.0",
