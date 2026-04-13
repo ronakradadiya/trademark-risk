@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:schemas": "tsx src/schemas/__tests__/schemas.test.ts"
+    "test:schemas": "tsx src/schemas/__tests__/schemas.test.ts",
+    "test:tools": "tsx src/tools/__tests__/tools.test.ts",
+    "test": "npm run test:schemas && npm run test:tools"
   },
   "dependencies": {
     "zod": "^3.23.8"
