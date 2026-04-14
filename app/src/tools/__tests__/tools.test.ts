@@ -1,16 +1,79 @@
 import { strict as assert } from 'node:assert';
+import Database from 'better-sqlite3';
 import { checkUsptoMarks } from '../check_uspto_marks.js';
 import { checkDomainAge } from '../check_domain_age.js';
 import { webSearch } from '../web_search.js';
-import { checkAttorney } from '../check_attorney.js';
 import { lookupApplicantHistory } from '../lookup_applicant_history.js';
+import { setUsptoDbForTest } from '../../lib/uspto_db.js';
 import {
   CheckUsptoMarksOutputSchema,
   CheckDomainAgeOutputSchema,
   WebSearchOutputSchema,
-  CheckAttorneyOutputSchema,
   ApplicantHistorySchema,
 } from '../../schemas/index.js';
+
+/**
+ * Build an in-memory USPTO SQLite fixture mirroring the production schema so
+ * check_uspto_marks and lookup_applicant_history can be exercised without
+ * touching the 12GB real DB.
+ */
+function buildTestDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('journal_mode = OFF');
+  db.exec(`
+    CREATE TABLE marks (
+      serial TEXT PRIMARY KEY,
+      mark TEXT NOT NULL,
+      mark_norm TEXT NOT NULL,
+      filing_date TEXT,
+      status_code TEXT,
+      status_date TEXT,
+      registration_date TEXT,
+      abandonment_date TEXT,
+      attorney_name TEXT,
+      classes TEXT NOT NULL,
+      owner_name TEXT,
+      owner_name_norm TEXT,
+      owner_country TEXT,
+      owner_legal_entity TEXT
+    );
+    CREATE VIRTUAL TABLE marks_fts USING fts5(mark, content='marks', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2');
+    CREATE TABLE applicants (
+      owner_name_norm TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      filing_count_total INTEGER NOT NULL,
+      filing_count_2yr INTEGER NOT NULL,
+      abandonment_rate REAL NOT NULL,
+      cancellation_rate REAL NOT NULL,
+      first_filing_date TEXT,
+      last_filing_date TEXT,
+      is_individual INTEGER NOT NULL,
+      is_foreign INTEGER NOT NULL,
+      attorney_of_record TEXT,
+      attorney_case_count INTEGER NOT NULL,
+      attorney_cancellation_rate REAL NOT NULL
+    );
+  `);
+
+  const insertMark = db.prepare(`
+    INSERT INTO marks (serial, mark, mark_norm, filing_date, status_code, classes, owner_name, owner_name_norm)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertMark.run('12345678', 'NIKE', 'nike', '20010101', '800', '025,028', 'Nike Inc', 'nike inc');
+  insertMark.run('22345678', 'NIKE PRO', 'nike pro', '20200101', '800', '025', 'Nike Inc', 'nike inc');
+  insertMark.run('33345678', 'DEADMARK', 'deadmark', '19950101', '710', '025', 'Old Co', 'old co');
+  db.exec(`INSERT INTO marks_fts(rowid, mark) SELECT rowid, mark FROM marks`);
+
+  const insertApplicant = db.prepare(`
+    INSERT INTO applicants (owner_name_norm, display_name, filing_count_total, filing_count_2yr,
+      abandonment_rate, cancellation_rate, first_filing_date, last_filing_date,
+      is_individual, is_foreign, attorney_of_record, attorney_case_count, attorney_cancellation_rate)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertApplicant.run('nike inc', 'Nike Inc', 9200, 310, 0.03, 0.008, '19710618', '20250101', 0, 0, 'Helen Hill Minsker', 2100, 0.009);
+  insertApplicant.run('hardkoo wu', 'Hardkoo Wu', 222, 180, 1.0, 0.0, '20220101', '20250101', 1, 0, null, 0, 0);
+  return db;
+}
 
 let passed = 0;
 let failed = 0;
@@ -55,82 +118,66 @@ function erroringFetch(msg: string): typeof fetch {
 }
 
 async function main() {
+  const testDb = buildTestDb();
+  setUsptoDbForTest(testDb);
+
   console.log('check_uspto_marks');
 
-  await test('returns parsed results on happy path', async () => {
-    const fetchImpl = mockFetch(() => ({
-      status: 200,
-      body: JSON.stringify({
-        total: 1,
-        results: [
-          {
-            serialNumber: '12345678',
-            markLiteralElement: 'NIKE',
-            ownerName: 'Nike Inc',
-            filingDate: '2001-01-01',
-            statusDescription: 'Registered',
-            internationalClass: [25, 28],
-          },
-        ],
-      }),
-    }));
-    const r = await checkUsptoMarks(
-      { brand_name: 'Nike', class_code: 25 },
-      { fetchImpl, baseUrl: 'https://example.test/search' }
-    );
+  await test('returns exact-normalized match', async () => {
+    const r = await checkUsptoMarks({ brand_name: 'Nike', class_code: 25 });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
     CheckUsptoMarksOutputSchema.parse(r.data);
-    assert.equal(r.data.results.length, 1);
-    assert.equal(r.data.results[0]!.mark_name, 'NIKE');
-    assert.deepEqual(r.data.results[0]!.class_codes, [25, 28]);
+    const serials = r.data.results.map((m) => m.serial_number);
+    assert.ok(serials.includes('12345678'));
+    const nike = r.data.results.find((m) => m.serial_number === '12345678')!;
+    assert.equal(nike.mark_name, 'NIKE');
+    assert.deepEqual(nike.class_codes, [25, 28]);
+    assert.equal(nike.filing_date, '2001-01-01');
+  });
+
+  await test('excludes dead marks (status 700-799) from results', async () => {
+    const r = await checkUsptoMarks({ brand_name: 'deadmark' });
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.total, 0);
+    assert.equal(r.data.results.length, 0);
   });
 
   await test('returns empty array for nonsense mark', async () => {
-    const fetchImpl = mockFetch(() => ({
-      status: 200,
-      body: JSON.stringify({ total: 0, results: [] }),
-    }));
-    const r = await checkUsptoMarks(
-      { brand_name: 'xyzzy99999abc' },
-      { fetchImpl, baseUrl: 'https://example.test/search' }
-    );
+    const r = await checkUsptoMarks({ brand_name: 'xyzzy99999abc' });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
     assert.equal(r.data.results.length, 0);
     assert.equal(r.data.total, 0);
   });
 
-  await test('handles timeout without throwing', async () => {
-    const r = await checkUsptoMarks(
-      { brand_name: 'Nike' },
-      { fetchImpl: timeoutFetch(), baseUrl: 'https://example.test/search', timeoutMs: 50 }
-    );
-    assert.equal(r.ok, false);
-    if (r.ok) throw new Error('unreachable');
-    assert.equal(r.error.code, 'timeout');
+  await test('filters by nice class when requested', async () => {
+    const r = await checkUsptoMarks({ brand_name: 'Nike', class_code: 42 });
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    // no nike rows in class 042 → zero results (FTS may still match but class filter excludes)
+    assert.equal(r.data.results.length, 0);
   });
 
-  await test('handles network failure without throwing', async () => {
-    const r = await checkUsptoMarks(
-      { brand_name: 'Nike' },
-      { fetchImpl: erroringFetch('ECONNRESET'), baseUrl: 'https://example.test/search' }
-    );
-    assert.equal(r.ok, false);
-    if (r.ok) throw new Error('unreachable');
-    assert.equal(r.error.code, 'network');
+  await test('FTS5 phrase match finds multi-word marks', async () => {
+    const r = await checkUsptoMarks({ brand_name: 'nike pro' });
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.ok(r.data.results.some((m) => m.serial_number === '22345678'));
   });
 
-  await test('handles HTTP 500 without throwing', async () => {
-    const fetchImpl = mockFetch(() => ({ status: 500, body: 'boom' }));
-    const r = await checkUsptoMarks(
-      { brand_name: 'Nike' },
-      { fetchImpl, baseUrl: 'https://example.test/search' }
-    );
+  await test('throws config error when db is missing', async () => {
+    setUsptoDbForTest(null);
+    const saved = process.env.USPTO_DB;
+    process.env.USPTO_DB = '/nonexistent/path/uspto.sqlite';
+    const r = await checkUsptoMarks({ brand_name: 'Nike' });
+    if (saved === undefined) delete process.env.USPTO_DB;
+    else process.env.USPTO_DB = saved;
+    setUsptoDbForTest(testDb);
     assert.equal(r.ok, false);
     if (r.ok) throw new Error('unreachable');
-    assert.equal(r.error.code, 'http');
-    assert.equal(r.error.status, 500);
+    assert.equal(r.error.code, 'config');
   });
 
   console.log('\ncheck_domain_age');
@@ -253,105 +300,49 @@ async function main() {
     assert.equal(r.error.status, 401);
   });
 
-  console.log('\ncheck_attorney');
-
-  await test('detects active status and no discipline', async () => {
-    const html = '<html><body>Name: Jane Doe. Status: Active, in good standing.</body></html>';
-    const fetchImpl = (async () =>
-      new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch;
-    const r = await checkAttorney(
-      { attorney_name: 'Jane Doe', bar_number: '12345' },
-      { fetchImpl, url: 'https://example.test/oed' }
-    );
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    CheckAttorneyOutputSchema.parse(r.data);
-    assert.equal(r.data.found, true);
-    assert.equal(r.data.bar_status, 'active');
-    assert.equal(r.data.disciplinary_history, false);
-  });
-
-  await test('detects not_found', async () => {
-    const html = '<html><body>No results found for your query.</body></html>';
-    const fetchImpl = (async () =>
-      new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch;
-    const r = await checkAttorney(
-      { attorney_name: 'Fake Name 99999' },
-      { fetchImpl, url: 'https://example.test/oed' }
-    );
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.found, false);
-    assert.equal(r.data.bar_status, 'unknown');
-  });
-
-  await test('detects suspended + disciplinary history', async () => {
-    const html =
-      '<html>Practitioner: Suspended on 2020-01-01 after disciplinary action (censure).</html>';
-    const fetchImpl = (async () =>
-      new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch;
-    const r = await checkAttorney(
-      { attorney_name: 'Bad Lawyer' },
-      { fetchImpl, url: 'https://example.test/oed' }
-    );
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.bar_status, 'suspended');
-    assert.equal(r.data.disciplinary_history, true);
-  });
-
-  await test('handles scraping failure without throwing', async () => {
-    const r = await checkAttorney(
-      { attorney_name: 'Jane' },
-      { fetchImpl: erroringFetch('dns fail'), url: 'https://example.test/oed' }
-    );
-    assert.equal(r.ok, false);
-  });
-
   console.log('\nlookup_applicant_history');
 
-  await test('returns fixture for known blue-chip applicant', async () => {
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'Apple Inc.' },
-      { disableLive: true }
-    );
+  await test('returns live SQLite row for known blue-chip applicant', async () => {
+    const r = await lookupApplicantHistory({ applicant_name: 'Nike Inc' });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
     ApplicantHistorySchema.parse(r.data);
-    assert.equal(r.data.source, 'fixture');
+    assert.equal(r.data.source, 'live');
     assert.equal(r.data.found, true);
-    assert.ok(r.data.filing_count_total > 10000);
+    assert.equal(r.data.filing_count_total, 9200);
     assert.ok(r.data.abandonment_rate < 0.1);
+    assert.equal(r.data.attorney_of_record, 'Helen Hill Minsker');
+    assert.equal(r.data.first_filing_date, '1971-06-18');
   });
 
-  await test('returns fixture for known troll applicant', async () => {
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'leo stoller' },
-      { disableLive: true }
-    );
+  await test('returns live SQLite row for troll-style individual filer', async () => {
+    const r = await lookupApplicantHistory({ applicant_name: 'hardkoo wu' });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.source, 'fixture');
-    assert.ok(r.data.abandonment_rate > 0.5);
+    assert.equal(r.data.source, 'live');
+    assert.equal(r.data.is_individual, true);
+    assert.equal(r.data.abandonment_rate, 1.0);
     assert.equal(r.data.attorney_of_record, null);
   });
 
-  await test('normalizes punctuation when matching fixtures', async () => {
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'NIKE, INC' },
-      { disableLive: true }
-    );
+  await test('normalizes punctuation when matching owner_name_norm', async () => {
+    const r = await lookupApplicantHistory({ applicant_name: 'NIKE, INC' });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.source, 'fixture');
+    assert.equal(r.data.source, 'live');
     assert.ok(r.data.found);
   });
 
-  await test('returns unknown-applicant shape when live disabled and no fixture', async () => {
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'Nonexistent Holdings ZZZ' },
-      { disableLive: true }
-    );
+  await test('falls back to fixture for demo-preset when DB misses', async () => {
+    const r = await lookupApplicantHistory({ applicant_name: 'Meridian Labs LLC' });
+    assert.equal(r.ok, true);
+    if (!r.ok) throw new Error('unreachable');
+    assert.equal(r.data.source, 'fixture');
+    assert.ok(r.data.filing_count_total > 0);
+  });
+
+  await test('returns unknown-applicant shape for arbitrary unseen name', async () => {
+    const r = await lookupApplicantHistory({ applicant_name: 'Nonexistent Holdings ZZZ' });
     assert.equal(r.ok, true);
     if (!r.ok) throw new Error('unreachable');
     assert.equal(r.data.source, 'unknown');
@@ -359,40 +350,7 @@ async function main() {
     assert.equal(r.data.filing_count_total, 0);
   });
 
-  await test('derives stats from live response when no fixture', async () => {
-    const fetchImpl = mockFetch(() => ({
-      status: 200,
-      body: JSON.stringify({
-        total: 4,
-        results: [
-          { serialNumber: '1', filingDate: '2025-01-01', abandoned: true },
-          { serialNumber: '2', filingDate: '2025-06-10', abandoned: false },
-          { serialNumber: '3', filingDate: '2024-03-01', cancelled: true },
-          { serialNumber: '4', filingDate: '2022-11-15', abandoned: false },
-        ],
-      }),
-    }));
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'Somename Holdings' },
-      { fetchImpl, baseUrl: 'https://example.test/owner' }
-    );
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    ApplicantHistorySchema.parse(r.data);
-    assert.equal(r.data.source, 'live');
-    assert.equal(r.data.filing_count_total, 4);
-    assert.ok(r.data.abandonment_rate > 0 && r.data.abandonment_rate < 1);
-  });
-
-  await test('falls back to unknown-applicant on network error for non-fixture', async () => {
-    const r = await lookupApplicantHistory(
-      { applicant_name: 'Unknown Co' },
-      { fetchImpl: erroringFetch('dns fail'), baseUrl: 'https://example.test/owner' }
-    );
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.source, 'unknown');
-  });
+  setUsptoDbForTest(null);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

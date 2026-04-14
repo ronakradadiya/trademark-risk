@@ -9,7 +9,6 @@ import {
   ApplicantHistorySchema,
   CheckUsptoMarksOutputSchema,
   CheckDomainAgeOutputSchema,
-  CheckAttorneyOutputSchema,
   WebSearchOutputSchema,
   type CheckRequest,
   type Verdict,
@@ -269,26 +268,6 @@ test('CheckDomainAgeOutput accepts null age', () => {
     registered_at: null,
     age_days: null,
   });
-});
-test('CheckAttorneyOutput accepts valid', () => {
-  CheckAttorneyOutputSchema.parse({
-    found: true,
-    name: 'Jane Doe',
-    bar_status: 'active',
-    disciplinary_history: false,
-  });
-});
-test('CheckAttorneyOutput rejects unknown bar_status', () => {
-  expectThrows(
-    () =>
-      CheckAttorneyOutputSchema.parse({
-        found: true,
-        name: 'X',
-        bar_status: 'retired',
-        disciplinary_history: false,
-      }),
-    'CheckAttorneyOutput'
-  );
 });
 test('WebSearchOutput rejects invalid url', () => {
   expectThrows(

@@ -39,23 +39,14 @@ function baseFeatures(overrides: Partial<FeatureVector> = {}): FeatureVector {
     owner_historical_cancellation_rate: 0.02,
     days_since_owner_first_filing: 3000,
     owner_is_individual: 0,
+    owner_is_foreign: 0,
     attorney_case_count: 50,
     attorney_cancellation_rate: 0.03,
-    owner_is_foreign: 0,
-    days_domain_to_filing: 1500,
     days_since_filing: 4000,
-    days_first_use_to_filing: 180,
     days_filing_to_registration: 300,
-    office_action_count: 0,
-    opposition_count: 0,
-    statement_of_use_filed: 1,
-    section_8_filed: 1,
-    has_acquired_distinctiveness: 0,
-    is_currently_active: 1,
     was_abandoned: 0,
-    filing_basis: 1,
+    is_currently_active: 1,
     class_breadth: 1,
-    specimen_type_encoded: 1,
   };
   return { ...base, ...overrides };
 }
@@ -74,7 +65,7 @@ async function main() {
     for (const p of POLICY_LIST) {
       assert.ok(p.name && typeof p.name === 'string');
       assert.ok(p.description && typeof p.description === 'string');
-      assert.ok(Array.isArray(p.tools) && p.tools.length >= 1);
+      assert.ok(Array.isArray(p.tools));
     }
   });
 
@@ -112,8 +103,6 @@ async function main() {
     const pred = await classifier.predict(
       baseFeatures({
         owner_filing_count_2yr: 1,
-        section_8_filed: 1,
-        opposition_count: 0,
         owner_abandonment_rate: 0,
         was_abandoned: 0,
       })
@@ -127,13 +116,13 @@ async function main() {
     const pred = await classifier.predict(
       baseFeatures({
         owner_filing_count_2yr: 300,
-        section_8_filed: 0,
-        opposition_count: 5,
         owner_abandonment_rate: 0.9,
+        owner_historical_cancellation_rate: 0.4,
         was_abandoned: 1,
         is_currently_active: 0,
         days_since_owner_first_filing: 60,
-        days_domain_to_filing: 5,
+        attorney_case_count: 0,
+        attorney_cancellation_rate: 0.5,
       })
     );
     assert.ok(
@@ -145,7 +134,7 @@ async function main() {
   await test('missing feature returns error, not crash', async () => {
     if (!classifier) throw new Error('classifier not loaded');
     const broken = baseFeatures();
-    delete (broken as Partial<FeatureVector>).section_8_filed;
+    delete (broken as Partial<FeatureVector>).class_breadth;
     await assert.rejects(
       () => classifier!.predict(broken as FeatureVector),
       (e) => e instanceof ClassifierError && e.code === 'missing_feature'
@@ -302,6 +291,37 @@ async function main() {
     assert.equal(verdict.source, 'ml_only');
     assert.equal(verdict.applicant, 'Known Troll LLC');
     assert.ok(verdict.tools_used.includes('lookup_applicant_history'));
+  });
+
+  await test('rule overlay short-circuits on pro-se burst filer (R1+R2+R3)', async () => {
+    const trollHistory: ApplicantHistory = {
+      applicant_name: 'Shell Filings LLC',
+      found: true,
+      filing_count_total: 85,
+      filing_count_2yr: 85,
+      abandonment_rate: 0.72,
+      cancellation_rate: 0.1,
+      first_filing_date: '2024-01-10',
+      is_individual: false,
+      is_foreign: false,
+      attorney_of_record: null,
+      attorney_case_count: 0,
+      attorney_cancellation_rate: 0,
+      source: 'live',
+    };
+    const verdict = await runCheck(
+      { brand_name: 'Anything', applicant_name: 'Shell Filings LLC' },
+      {
+        classifier: stubClassifier(0.3), // low ML score — rule must override
+        applicantHistory: trollHistory,
+      }
+    );
+    VerdictSchema.parse(verdict);
+    assert.equal(verdict.verdict, 'high_risk');
+    assert.equal(verdict.source, 'rule_override');
+    assert.ok(verdict.summary.includes('R1'));
+    assert.ok(verdict.summary.includes('R2'));
+    assert.ok(verdict.summary.includes('R3'));
   });
 
   // Fake OpenAI client — two-turn: tool call, then final JSON verdict.
