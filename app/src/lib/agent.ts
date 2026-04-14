@@ -14,12 +14,12 @@ import {
   POLICY_KEYS,
 } from '../schemas/index.js';
 import { POLICIES, POLICY_LIST } from './policies.js';
+import { evaluateHardRules, hitsToPolicyBundle } from './rules.js';
 import type { Classifier, FeatureVector } from './classifier.js';
-import { BASELINE_MARK_FEATURES, applicantToFeatures } from './features.js';
+import { UNKNOWN_MARK_FEATURES, applicantToFeatures, markFeaturesFromPriorArt } from './features.js';
 import { checkUsptoMarks } from '../tools/check_uspto_marks.js';
 import { checkDomainAge } from '../tools/check_domain_age.js';
 import { webSearch } from '../tools/web_search.js';
-import { checkAttorney } from '../tools/check_attorney.js';
 import { lookupApplicantHistory } from '../tools/lookup_applicant_history.js';
 
 const AGENT_HIGH = 0.85; // ml_confidence > AGENT_HIGH → short-circuit high_risk
@@ -40,7 +40,6 @@ export interface AgentDeps {
     check_uspto_marks: typeof checkUsptoMarks;
     check_domain_age: typeof checkDomainAge;
     web_search: typeof webSearch;
-    check_attorney: typeof checkAttorney;
   }>;
 }
 
@@ -93,21 +92,6 @@ function toolSpecs(): OpenAI.Chat.Completions.ChatCompletionTool[] {
         },
       },
     },
-    {
-      type: 'function',
-      function: {
-        name: 'check_attorney',
-        description: 'Look up USPTO OED attorney bar status and disciplinary history.',
-        parameters: {
-          type: 'object',
-          properties: {
-            attorney_name: { type: 'string' },
-            bar_number: { type: 'string' },
-          },
-          required: ['attorney_name'],
-        },
-      },
-    },
   ];
 }
 
@@ -117,7 +101,7 @@ function systemPrompt(): string {
 
 The system has already pulled the applicant's USPTO history and scored them with an ML ranker — you will see that score and the raw history in the user message. Use it as a prior, not a verdict. Your job is to investigate the BRAND.
 
-You have 4 investigation tools: check_uspto_marks, check_domain_age, web_search, check_attorney. Call them in whatever order makes sense based on what you find. You may call the same tool multiple times with different queries. Do NOT ask the user questions — act autonomously.
+You have 3 investigation tools: check_uspto_marks, check_domain_age, web_search. Call them in whatever order makes sense based on what you find. You may call the same tool multiple times with different queries. Do NOT ask the user questions — act autonomously. Policy P4 (attorney red flag) is evaluated directly from the applicant_history fields in the user message — do NOT call a tool for P4.
 
 Then evaluate each of the 5 policies below and return a structured verdict.
 
@@ -171,8 +155,15 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
   const now = (deps.now ?? (() => new Date()))();
 
   const applicantHistory = await resolveApplicantHistory(req, deps);
+  let markFeatures: Partial<FeatureVector>;
+  try {
+    markFeatures = markFeaturesFromPriorArt(req.brand_name, req.class_code);
+  } catch {
+    markFeatures = { ...UNKNOWN_MARK_FEATURES };
+  }
   const features: FeatureVector = {
-    ...BASELINE_MARK_FEATURES,
+    ...UNKNOWN_MARK_FEATURES,
+    ...markFeatures,
     ...applicantToFeatures(applicantHistory, now),
     ...(deps.featureOverrides ?? {}),
   } as FeatureVector;
@@ -190,6 +181,29 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
     },
   ];
   const preTools: ToolName[] = ['lookup_applicant_history'];
+
+  // Deterministic rule overlay runs before ML / agent: if the applicant's
+  // real USPTO history matches an obvious troll pattern, force high_risk and
+  // skip downstream inference. This exists because some filer patterns are
+  // beyond-reasonable-doubt bad and we don't want the LLM to second-guess them.
+  const ruleHits = evaluateHardRules(applicantHistory);
+  if (ruleHits.length > 0) {
+    const reason = ruleHits.map((h) => `[${h.id}] ${h.reason}`).join(' ');
+    return VerdictSchema.parse({
+      brand: req.brand_name,
+      applicant: req.applicant_name,
+      verdict: 'high_risk',
+      overall_confidence: 0.95,
+      ml,
+      applicant_history: applicantHistory,
+      source: 'rule_override',
+      policies: hitsToPolicyBundle(ruleHits),
+      tools_used: preTools,
+      trace: preTrace,
+      summary: `Hard-rule override: ${reason}`,
+      checked_at: now.toISOString(),
+    });
+  }
 
   if (ml.score > AGENT_HIGH) {
     const reason = `Filer risk score ${ml.score.toFixed(3)} exceeds high-risk threshold ${AGENT_HIGH} — abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, ${applicantHistory.filing_count_2yr} filings in 24mo.`;
@@ -377,14 +391,6 @@ async function executeTool(
         const r = await fn({
           query: String(a.query ?? ''),
           ...(typeof a.max_results === 'number' ? { max_results: a.max_results } : {}),
-        });
-        return r.ok ? { ok: true, data: r.data } : { ok: false, error: r.error };
-      }
-      case 'check_attorney': {
-        const fn = tools.check_attorney ?? checkAttorney;
-        const r = await fn({
-          attorney_name: String(a.attorney_name ?? ''),
-          ...(typeof a.bar_number === 'string' ? { bar_number: a.bar_number } : {}),
         });
         return r.ok ? { ok: true, data: r.data } : { ok: false, error: r.error };
       }

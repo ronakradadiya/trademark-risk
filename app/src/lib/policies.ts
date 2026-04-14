@@ -31,10 +31,10 @@ export const POLICIES: Record<PolicyKey, PolicyDefinition> = {
   },
   P4: {
     key: 'P4',
-    name: 'Attorney credentials suspicious',
+    name: 'Attorney of record is a red flag',
     description:
-      'The attorney is not found in the USPTO OED directory, their bar status is inactive or suspended, they have disciplinary history or sanctions, or they are known to work exclusively with high-volume troll filers. Evaluate using check_attorney results.',
-    tools: ['check_attorney'],
+      'The applicant filed pro se (no attorney of record) despite high filing volume, or their attorney of record has an elevated cancellation rate relative to the USPTO baseline (~8%). Pro se filing with more than five filings in the last 24 months is itself a strong signal: legitimate high-volume filers retain counsel. Evaluate using the applicant_history fields already provided in the user message (attorney_of_record, attorney_case_count, attorney_cancellation_rate, filing_count_2yr). Do NOT call a tool for this policy.',
+    tools: [],
   },
   P5: {
     key: 'P5',

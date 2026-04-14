@@ -5,7 +5,7 @@ export type PolicyKey = (typeof POLICY_KEYS)[number];
 
 export const RISK_TIERS = ['high', 'mid', 'low'] as const;
 export const VERDICTS = ['safe', 'review', 'high_risk'] as const;
-export const VERDICT_SOURCES = ['ml_only', 'ml_and_agent'] as const;
+export const VERDICT_SOURCES = ['ml_only', 'ml_and_agent', 'rule_override'] as const;
 
 export const CheckRequestSchema = z.object({
   brand_name: z.string().min(1).max(200),
@@ -108,23 +108,11 @@ export const WebSearchOutputSchema = z.object({
   results: z.array(WebSearchResultSchema),
 });
 
-export const CheckAttorneyInputSchema = z.object({
-  attorney_name: z.string().min(1),
-  bar_number: z.string().optional(),
-});
-export const CheckAttorneyOutputSchema = z.object({
-  found: z.boolean(),
-  name: z.string().nullable(),
-  bar_status: z.enum(['active', 'inactive', 'suspended', 'unknown']),
-  disciplinary_history: z.boolean(),
-});
-
 export const TOOL_NAMES = [
   'lookup_applicant_history',
   'check_uspto_marks',
   'check_domain_age',
   'web_search',
-  'check_attorney',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
