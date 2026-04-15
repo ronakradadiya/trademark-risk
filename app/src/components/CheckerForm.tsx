@@ -29,13 +29,12 @@ const PRESETS: Preset[] = [
     },
   },
   {
-    label: 'Meridian Labs + NovaPay',
-    tagline: 'shell LLC, suspicious',
+    label: 'I420 LLC + LA420',
+    tagline: 'real shell-LLC filer',
     request: {
-      brand_name: 'NovaPay',
-      applicant_name: 'Meridian Labs LLC',
-      domain_name: 'novapay.io',
-      class_code: 36,
+      brand_name: 'LA420',
+      applicant_name: 'I420 LLC',
+      class_code: 35,
     },
   },
   {
@@ -91,7 +90,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               type="text"
               value={applicantName}
               onChange={(e) => setApplicantName(e.target.value)}
-              placeholder="e.g. Meridian Labs LLC"
+              placeholder="e.g. I420 LLC"
               maxLength={200}
               required
               aria-label="applicant name"
@@ -104,7 +103,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               type="text"
               value={brandName}
               onChange={(e) => setBrandName(e.target.value)}
-              placeholder="e.g. NovaPay"
+              placeholder="e.g. LA420"
               maxLength={200}
               required
               aria-label="brand name"
@@ -119,7 +118,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               type="text"
               value={domainName}
               onChange={(e) => setDomainName(e.target.value)}
-              placeholder="novapay.io"
+              placeholder="example.com"
             />
           </div>
           <div>
@@ -131,7 +130,7 @@ export function CheckerForm({ onSubmit, loading }: Props) {
               max={45}
               value={classCode}
               onChange={(e) => setClassCode(e.target.value)}
-              placeholder="36"
+              placeholder="35"
             />
           </div>
         </div>

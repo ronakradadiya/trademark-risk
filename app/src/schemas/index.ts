@@ -30,7 +30,7 @@ export const ApplicantHistorySchema = z.object({
   attorney_of_record: z.string().nullable(),
   attorney_case_count: z.number().int().min(0),
   attorney_cancellation_rate: z.number().min(0).max(1),
-  source: z.enum(['fixture', 'live', 'unknown']),
+  source: z.enum(['live', 'unknown']),
 });
 export type ApplicantHistory = z.infer<typeof ApplicantHistorySchema>;
 

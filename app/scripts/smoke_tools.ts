@@ -33,10 +33,6 @@ async function run(): Promise<void> {
     console.log('hard rules fired:', evaluateHardRules(i420.data).map((h) => `${h.id}:${h.policy}`));
   }
 
-  header('lookup_applicant_history: Meridian Labs LLC (fixture fallback)');
-  const meridian = await lookupApplicantHistory({ applicant_name: 'Meridian Labs LLC' });
-  console.log(meridian);
-
   header('lookup_applicant_history: Nonsense Holdings ZZZ (unknown)');
   const unknown = await lookupApplicantHistory({ applicant_name: 'Nonsense Holdings ZZZ' });
   console.log(unknown);

@@ -31,7 +31,7 @@ Feature-level smoke test against the dev server:
 ```bash
 curl -sS -X POST http://localhost:3000/api/check \
   -H 'content-type: application/json' \
-  -d '{"brand_name":"NovaPay","applicant_name":"Meridian Labs LLC","class_code":36}'
+  -d '{"brand_name":"LA420","applicant_name":"I420 LLC","class_code":35}'
 ```
 
 ## Architecture (the parts that require reading multiple files)

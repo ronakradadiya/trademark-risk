@@ -333,14 +333,6 @@ async function main() {
     assert.ok(r.data.found);
   });
 
-  await test('falls back to fixture for demo-preset when DB misses', async () => {
-    const r = await lookupApplicantHistory({ applicant_name: 'Meridian Labs LLC' });
-    assert.equal(r.ok, true);
-    if (!r.ok) throw new Error('unreachable');
-    assert.equal(r.data.source, 'fixture');
-    assert.ok(r.data.filing_count_total > 0);
-  });
-
   await test('returns unknown-applicant shape for arbitrary unseen name', async () => {
     const r = await lookupApplicantHistory({ applicant_name: 'Nonexistent Holdings ZZZ' });
     assert.equal(r.ok, true);

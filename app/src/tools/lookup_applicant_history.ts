@@ -11,28 +11,6 @@ import type Database from 'better-sqlite3';
 type Input = z.infer<typeof LookupApplicantInputSchema>;
 type Output = ApplicantHistory;
 
-/**
- * Demo fixtures keyed by normalized applicant name. These give the CEO demo
- * deterministic, dramatically-scripted answers for well-known filer archetypes
- * (blue-chip, famous troll, shell LLC). Only used when the local SQLite lookup
- * returns no rows — real USPTO data always wins.
- */
-const FIXTURES: Record<string, Omit<ApplicantHistory, 'applicant_name' | 'source'>> = {
-  'meridian labs llc': {
-    found: true,
-    filing_count_total: 47,
-    filing_count_2yr: 47,
-    abandonment_rate: 0.61,
-    cancellation_rate: 0.14,
-    first_filing_date: '2024-02-11',
-    is_individual: false,
-    is_foreign: false,
-    attorney_of_record: null,
-    attorney_case_count: 0,
-    attorney_cancellation_rate: 0,
-  },
-};
-
 interface ApplicantRow {
   display_name: string;
   filing_count_total: number;
@@ -92,13 +70,6 @@ function queryApplicant(
   return rowToHistory(applicantName, row);
 }
 
-function fromFixture(rawName: string): ApplicantHistory | null {
-  const key = normalizeOwnerName(rawName);
-  const base = FIXTURES[key];
-  if (!base) return null;
-  return { applicant_name: rawName, source: 'fixture', ...base };
-}
-
 export function unknownApplicant(applicantName: string): ApplicantHistory {
   return {
     applicant_name: applicantName,
@@ -128,7 +99,7 @@ export async function lookupApplicantHistory(
     try {
       db = getUsptoDb();
     } catch {
-      // DB missing — fall through to fixtures / unknown so the tool still
+      // DB missing — fall through to unknownApplicant so the tool still
       // returns a valid ApplicantHistory instead of a hard config error.
     }
 
@@ -145,9 +116,6 @@ export async function lookupApplicantHistory(
         return validated.data;
       }
     }
-
-    const fixture = fromFixture(parsed.applicant_name);
-    if (fixture) return fixture;
 
     return unknownApplicant(parsed.applicant_name);
   });

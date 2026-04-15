@@ -149,7 +149,7 @@ const validHistory: ApplicantHistory = {
   attorney_of_record: 'Jane Doe',
   attorney_case_count: 120,
   attorney_cancellation_rate: 0.02,
-  source: 'fixture',
+  source: 'live',
 };
 
 const validVerdict: Verdict = {

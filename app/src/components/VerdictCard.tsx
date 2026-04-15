@@ -81,11 +81,7 @@ export function VerdictCard({ verdict }: Props) {
 function ApplicantHistoryCard({ history }: { history: ApplicantHistory }) {
   const pct = (v: number) => `${Math.round(v * 100)}%`;
   const sourceLabel =
-    history.source === 'fixture'
-      ? 'cached USPTO fixture'
-      : history.source === 'live'
-      ? 'live USPTO'
-      : 'not found in USPTO';
+    history.source === 'live' ? 'live USPTO' : 'not found in USPTO';
 
   if (!history.found) {
     return (

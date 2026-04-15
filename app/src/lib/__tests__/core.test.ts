@@ -195,7 +195,7 @@ async function main() {
     attorney_of_record: 'Jane Doe',
     attorney_case_count: 100,
     attorney_cancellation_rate: 0.02,
-    source: 'fixture',
+    source: 'live',
   };
 
   const sampleVerdict: Verdict = VerdictSchema.parse({
@@ -407,7 +407,7 @@ async function main() {
     assert.equal(verdict.source, 'ml_and_agent');
     assert.equal(verdict.verdict, 'review');
     assert.equal(verdict.applicant, 'BrewBox Holdings LLC');
-    assert.equal(verdict.applicant_history?.source, 'fixture');
+    assert.equal(verdict.applicant_history?.source, 'live');
     for (const k of ['P1', 'P2', 'P3', 'P4', 'P5'] as const) {
       assert.ok(verdict.policies[k]);
       assert.equal(typeof verdict.policies[k].triggered, 'boolean');
