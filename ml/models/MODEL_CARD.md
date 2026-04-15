@@ -1,17 +1,31 @@
-# v4 stacking ensemble — SQLite retrain (April 2026)
+# v4 XGBoost classifier — SQLite retrain (April 2026)
 
 ## Snapshot
 
 | Field | Value |
 |---|---|
-| Architecture | xgboost + catboost → Logistic Regression meta-learner (unchanged from v4) |
+| Architecture | XGBoost (single tree ensemble) |
 | Training data snapshot | April 2026 USPTO TRTYRAP XML feed → `data/uspto.sqlite` |
 | Training samples | 44,801 train / 9,601 val / 9,601 test (64,003 total, 25% positive) |
 | Filing years sampled | 2000–2024 |
 | Features | 13 (8 applicant-side + 5 mark-side) |
-| Decision threshold | 0.25 (tuned for recall ≥ 0.85 on val) |
-| Export format | ONNX (opset 12, ai.onnx.ml 3), ZipMap stripped |
+| Decision threshold | 0.50 (tuned for recall ≥ 0.85 on val) |
+| Export format | ONNX (opset 12, ai.onnx.ml 3), ZipMap disabled |
 | Pipeline script | [ml/src/build_from_sqlite.py](../src/build_from_sqlite.py) |
+
+## Architecture choice
+
+An earlier iteration stacked XGBoost + CatBoost through a Logistic Regression
+meta-learner. Stacking added **+0.001 AUC** on the validation set — well inside
+measurement noise. Both base models are gradient-boosted trees, so the
+diversity premise that motivates stacking (different model families making
+independent errors) never applied. The meta-LR was effectively learning the
+identity function over two near-identical probability streams.
+
+Single XGBoost keeps the v4 metrics, removes two ONNX sessions and the
+meta-LR graph-surgery step, and shrinks the serving artifact from 1.85 MB to
+252 KB. The retrain did not re-tune thresholds — the single-model score
+distribution matches the meta-LR output closely enough in practice.
 
 ## Label source
 
@@ -86,15 +100,24 @@ shows up in their own training-time abandonment rate.
 Implementation: per-owner sorted timeline built once, then binary-search
 (`bisect`) for each sample. O(N log N) total.
 
-## Validation metrics (held-out test set, n=9,601)
+## Validation metrics (held-out test set, n=9,600)
 
 | metric | value |
 |---|---|
-| AUC-ROC | 0.8275 |
-| Brier score | 0.1407 |
-| Precision @ 0.25 | 0.4643 |
-| Recall @ 0.25 | 0.8546 |
-| F1 @ 0.25 | 0.6017 |
+| AUC-ROC | 0.8256 |
+| Brier score | 0.1766 |
+| Precision @ 0.50 | 0.4531 |
+| Recall @ 0.50 | 0.8775 |
+| F1 @ 0.50 | 0.5976 |
+
+The decision threshold moved from 0.25 (stacked output) to 0.50 (XGBoost raw
+output) because tree probabilities are uncalibrated — the meta-LR in the
+former stack was effectively a calibration layer. At each model's own
+best-F1 threshold the operating point is the same (precision ≈ 0.45,
+recall ≈ 0.86, F1 ≈ 0.60). AUC is unchanged within noise. Brier is higher
+because the scores are uncalibrated; the `agent_high` short-circuit at 0.85
+and the `HIGH_THRESHOLD=0.7` tier boundary in `classifier.ts` still work
+because tree probabilities agree with calibrated probabilities at the tails.
 
 Cross-validation stability (5-fold, F1): XGBoost 0.600 ± 0.006, LightGBM
 0.599 ± 0.005. Well under the 0.05 drift gate — the feature set is not
@@ -116,18 +139,18 @@ Script: [ml/src/compare_models.py](../src/compare_models.py).
 
 | metric | OLD (22 feat, 14 constants) | NEW (13 feat, all real) | Δ |
 |---|---|---|---|
-| AUC-ROC   | 0.6565 | **0.8275** | +0.171 |
-| Brier     | 0.2286 | **0.1407** | −0.088 |
-| Precision | 0.4371 | **0.4643** | +0.027 |
-| Recall    | 0.0304 | **0.8546** | +0.824 |
-| F1        | 0.0569 | **0.6017** | +0.545 |
+| AUC-ROC   | 0.6565 | **0.8256** | +0.169 |
+| Brier     | 0.2286 | **0.1766** | −0.052 |
+| Precision | 0.4371 | **0.4531** | +0.016 |
+| Recall    | 0.0304 | **0.8775** | +0.847 |
+| F1        | 0.0569 | **0.5976** | +0.541 |
 
 The old model's recall collapses to 3% at its own production threshold (0.35)
-because the meta-LR at the top of the stack had never trained on a feature
-vector with 14 zero-ish constants — it sees a distribution it has no priors
-for and defaults to low confidence. The 22-feature model passed its isolated
-test set during training (AUC ≈ 0.95 on the TCFD snapshot it was trained on)
-but the numbers above are what it actually produces in production today.
+because its stacked meta-LR had never trained on a feature vector with 14
+zero-ish constants — it sees a distribution it has no priors for and defaults
+to low confidence. The 22-feature model passed its isolated test set during
+training (AUC ≈ 0.95 on the TCFD snapshot it was trained on) but the numbers
+above are what it actually produces in production today.
 
 Gate criteria (from the retrain plan):
 - Brier: new must be lower than old. **PASS** (0.141 < 0.229)

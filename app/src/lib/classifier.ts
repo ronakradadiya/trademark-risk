@@ -57,8 +57,7 @@ function featuresToRow(features: FeatureVector): Float32Array {
 }
 
 function extractProb(output: ort.InferenceSession.ReturnType): number {
-  // XGBoost/LR ONNX (skl2onnx/onnxmltools) emit [label, [{0: p0, 1: p1}, ...]]
-  // CatBoost emits a flat probability matrix [[p0, p1]]
+  // XGBoost ONNX (skl2onnx with zipmap=false) emits a [N, 2] probability tensor.
   const entries = Object.values(output);
   for (const t of entries) {
     if (!t) continue;
@@ -88,67 +87,36 @@ function extractProb(output: ort.InferenceSession.ReturnType): number {
 
 export async function loadClassifier(modelsDir: string = DEFAULT_MODELS_DIR): Promise<Classifier> {
   const xgbPath = path.join(modelsDir, 'xgboost.onnx');
-  const catPath = path.join(modelsDir, 'catboost.onnx');
-  const metaPath = path.join(modelsDir, 'meta_lr.onnx');
 
-  for (const p of [xgbPath, catPath, metaPath]) {
-    if (!fs.existsSync(p)) {
-      throw new ClassifierError(`model file not found: ${p}`, 'model_load');
-    }
+  if (!fs.existsSync(xgbPath)) {
+    throw new ClassifierError(`model file not found: ${xgbPath}`, 'model_load');
   }
 
   let xgb: ort.InferenceSession;
-  let cat: ort.InferenceSession;
-  let meta: ort.InferenceSession;
   try {
-    [xgb, cat, meta] = await Promise.all([
-      ort.InferenceSession.create(xgbPath),
-      ort.InferenceSession.create(catPath),
-      ort.InferenceSession.create(metaPath),
-    ]);
+    xgb = await ort.InferenceSession.create(xgbPath);
   } catch (e) {
     throw new ClassifierError(
-      `failed to load ONNX sessions: ${e instanceof Error ? e.message : String(e)}`,
+      `failed to load ONNX session: ${e instanceof Error ? e.message : String(e)}`,
       'model_load'
     );
   }
 
   const xgbInput = xgb.inputNames[0] ?? 'input';
-  const catInput = cat.inputNames[0] ?? 'features';
-  const metaInput = meta.inputNames[0] ?? 'meta_input';
 
   return {
     async predict(features) {
       const row = featuresToRow(features);
       const xTensor = new ort.Tensor('float32', row, [1, FEATURE_COLS.length]);
 
-      let xgbProb: number;
-      let catProb: number;
+      let score: number;
       try {
-        const [xgbOut, catOut] = await Promise.all([
-          xgb.run({ [xgbInput]: xTensor }),
-          cat.run({ [catInput]: xTensor }),
-        ]);
-        xgbProb = extractProb(xgbOut);
-        catProb = extractProb(catOut);
+        const xgbOut = await xgb.run({ [xgbInput]: xTensor });
+        score = extractProb(xgbOut);
       } catch (e) {
         if (e instanceof ClassifierError) throw e;
         throw new ClassifierError(
-          `base model inference failed: ${e instanceof Error ? e.message : String(e)}`,
-          'inference'
-        );
-      }
-
-      const metaData = new Float32Array([xgbProb, catProb]);
-      const metaTensor = new ort.Tensor('float32', metaData, [1, 2]);
-
-      let score: number;
-      try {
-        const metaOut = await meta.run({ [metaInput]: metaTensor });
-        score = extractProb(metaOut);
-      } catch (e) {
-        throw new ClassifierError(
-          `meta model inference failed: ${e instanceof Error ? e.message : String(e)}`,
+          `inference failed: ${e instanceof Error ? e.message : String(e)}`,
           'inference'
         );
       }
