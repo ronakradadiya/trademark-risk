@@ -293,37 +293,6 @@ async function main() {
     assert.ok(verdict.tools_used.includes('lookup_applicant_history'));
   });
 
-  await test('rule overlay short-circuits on pro-se burst filer (R1+R2+R3)', async () => {
-    const trollHistory: ApplicantHistory = {
-      applicant_name: 'Shell Filings LLC',
-      found: true,
-      filing_count_total: 85,
-      filing_count_2yr: 85,
-      abandonment_rate: 0.72,
-      cancellation_rate: 0.1,
-      first_filing_date: '2024-01-10',
-      is_individual: false,
-      is_foreign: false,
-      attorney_of_record: null,
-      attorney_case_count: 0,
-      attorney_cancellation_rate: 0,
-      source: 'live',
-    };
-    const verdict = await runCheck(
-      { brand_name: 'Anything', applicant_name: 'Shell Filings LLC' },
-      {
-        classifier: stubClassifier(0.3), // low ML score — rule must override
-        applicantHistory: trollHistory,
-      }
-    );
-    VerdictSchema.parse(verdict);
-    assert.equal(verdict.verdict, 'high_risk');
-    assert.equal(verdict.source, 'rule_override');
-    assert.ok(verdict.summary.includes('R1'));
-    assert.ok(verdict.summary.includes('R2'));
-    assert.ok(verdict.summary.includes('R3'));
-  });
-
   // Fake OpenAI client — two-turn: tool call, then final JSON verdict.
   function makeFakeOpenAI(opts: { finalJson: object; toolName?: string }): object {
     let turn = 0;

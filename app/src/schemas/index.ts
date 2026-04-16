@@ -5,7 +5,7 @@ export type PolicyKey = (typeof POLICY_KEYS)[number];
 
 export const RISK_TIERS = ['high', 'mid', 'low'] as const;
 export const VERDICTS = ['safe', 'review', 'high_risk'] as const;
-export const VERDICT_SOURCES = ['ml_only', 'ml_and_agent', 'rule_override'] as const;
+export const VERDICT_SOURCES = ['ml_only', 'ml_and_agent'] as const;
 
 export const CheckRequestSchema = z.object({
   brand_name: z.string().min(1).max(200),

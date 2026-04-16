@@ -14,7 +14,6 @@ import {
   POLICY_KEYS,
 } from '../schemas/index.js';
 import { POLICIES, POLICY_LIST } from './policies.js';
-import { evaluateHardRules, hitsToPolicyBundle } from './rules.js';
 import type { Classifier, FeatureVector } from './classifier.js';
 import { UNKNOWN_MARK_FEATURES, applicantToFeatures, markFeaturesFromPriorArt } from './features.js';
 import { checkUsptoMarks } from '../tools/check_uspto_marks.js';
@@ -24,7 +23,7 @@ import { lookupApplicantHistory } from '../tools/lookup_applicant_history.js';
 
 const AGENT_HIGH = 0.85; // ml_confidence > AGENT_HIGH → short-circuit high_risk
 const MAX_AGENT_STEPS = 10;
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o';
+const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.4';
 
 export interface AgentDeps {
   classifier: Classifier;
@@ -181,29 +180,6 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
     },
   ];
   const preTools: ToolName[] = ['lookup_applicant_history'];
-
-  // Deterministic rule overlay runs before ML / agent: if the applicant's
-  // real USPTO history matches an obvious troll pattern, force high_risk and
-  // skip downstream inference. This exists because some filer patterns are
-  // beyond-reasonable-doubt bad and we don't want the LLM to second-guess them.
-  const ruleHits = evaluateHardRules(applicantHistory);
-  if (ruleHits.length > 0) {
-    const reason = ruleHits.map((h) => `[${h.id}] ${h.reason}`).join(' ');
-    return VerdictSchema.parse({
-      brand: req.brand_name,
-      applicant: req.applicant_name,
-      verdict: 'high_risk',
-      overall_confidence: 0.95,
-      ml,
-      applicant_history: applicantHistory,
-      source: 'rule_override',
-      policies: hitsToPolicyBundle(ruleHits),
-      tools_used: preTools,
-      trace: preTrace,
-      summary: `Hard-rule override: ${reason}`,
-      checked_at: now.toISOString(),
-    });
-  }
 
   if (ml.score > AGENT_HIGH) {
     const reason = `Filer risk score ${ml.score.toFixed(3)} exceeds high-risk threshold ${AGENT_HIGH} — abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, ${applicantHistory.filing_count_2yr} filings in 24mo.`;

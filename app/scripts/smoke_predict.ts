@@ -1,7 +1,6 @@
 import { lookupApplicantHistory } from '../src/tools/lookup_applicant_history.js';
 import { loadClassifier, type FeatureVector } from '../src/lib/classifier.js';
 import { applicantToFeatures, markFeaturesFromPriorArt, DEFAULT_PRE_FILING_FEATURES } from '../src/lib/features.js';
-import { evaluateHardRules } from '../src/lib/rules.js';
 
 interface Case {
   applicant: string;
@@ -32,9 +31,9 @@ const CASES: Case[] = [
 async function main(): Promise<void> {
   const classifier = await loadClassifier();
   console.log(
-    `${'applicant'.padEnd(32)} ${'brand'.padEnd(18)} ${'score'.padStart(7)} ${'tier'.padStart(5)} ${'rules'.padStart(10)} expect`
+    `${'applicant'.padEnd(32)} ${'brand'.padEnd(18)} ${'score'.padStart(7)} ${'tier'.padStart(5)} expect`
   );
-  console.log('-'.repeat(95));
+  console.log('-'.repeat(85));
 
   for (const c of CASES) {
     const hist = await lookupApplicantHistory({ applicant_name: c.applicant });
@@ -43,11 +42,10 @@ async function main(): Promise<void> {
     const features: FeatureVector = { ...DEFAULT_PRE_FILING_FEATURES, ...applicantFeats, ...markFeats };
 
     const pred = await classifier.predict(features);
-    const rules = hist.ok ? evaluateHardRules(hist.data).map((r) => r.id).join(',') || '—' : '—';
 
     const line =
       `${c.applicant.padEnd(32)} ${c.brand.padEnd(18)} ${pred.score.toFixed(3).padStart(7)} ` +
-      `${pred.tier.padStart(5)} ${rules.padStart(10)} ${c.expect}`;
+      `${pred.tier.padStart(5)} ${c.expect}`;
     console.log(line);
   }
 }
