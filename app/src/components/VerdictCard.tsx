@@ -2,6 +2,7 @@
 
 import type { ApplicantHistory, Verdict } from '../schemas/index.js';
 import { POLICIES } from '../lib/policies.js';
+import { POLICY_KEYS } from '../schemas/index.js';
 
 interface Props {
   verdict: Verdict;
@@ -37,7 +38,7 @@ export function VerdictCard({ verdict }: Props) {
 
       <h2>Policies</h2>
       <div>
-        {(['P1', 'P2', 'P3', 'P4', 'P5'] as const).map((key) => {
+        {POLICY_KEYS.map((key) => {
           const result = verdict.policies[key];
           const policy = POLICIES[key];
           return (

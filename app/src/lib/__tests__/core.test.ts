@@ -374,7 +374,8 @@ async function main() {
     );
     VerdictSchema.parse(verdict);
     assert.equal(verdict.source, 'ml_and_agent');
-    assert.equal(verdict.verdict, 'review');
+    // Deterministic: no policies triggered → 'safe' regardless of what the agent JSON said.
+    assert.equal(verdict.verdict, 'safe');
     assert.equal(verdict.applicant, 'BrewBox Holdings LLC');
     assert.equal(verdict.applicant_history?.source, 'live');
     for (const k of ['P1', 'P2', 'P3', 'P4', 'P5'] as const) {
@@ -436,7 +437,8 @@ async function main() {
     // Trace: [0] lookup pre-step, [1] failed check_domain_age
     assert.equal(verdict.trace.length, 2);
     assert.ok(verdict.trace[1]!.error !== null);
-    assert.equal(verdict.verdict, 'review');
+    // Deterministic: no policies triggered → 'safe'.
+    assert.equal(verdict.verdict, 'safe');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

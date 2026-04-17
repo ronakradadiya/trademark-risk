@@ -50,6 +50,13 @@ function emptyPolicies(reason: string): PolicyBundle {
   return { P1: r, P2: r, P3: r, P4: r, P5: r };
 }
 
+function verdictFromPolicies(policies: PolicyBundle): Verdict['verdict'] {
+  const triggered = POLICY_KEYS.filter((k) => policies[k].triggered);
+  if (triggered.length === 0) return 'safe';
+  const score = triggered.reduce((s, k) => s + (policies[k].confidence >= 0.8 ? 2 : 1), 0);
+  return score >= 4 ? 'high_risk' : 'review';
+}
+
 function toolSpecs(): OpenAI.Chat.Completions.ChatCompletionTool[] {
   return [
     {
@@ -224,16 +231,17 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
   const agentResult = await runAgentLoop(req, ml, applicantHistory, deps);
 
   const finalConfidence = ml.score * 0.35 + agentResult.parsed.overall_confidence * 0.65;
+  const verdict = verdictFromPolicies(agentResult.parsed.policies);
   emit({
     kind: 'verdict',
-    label: `Verdict: ${agentResult.parsed.verdict.replace('_', ' ')}`,
+    label: `Verdict: ${verdict.replace('_', ' ')}`,
     status: 'completed',
     detail: agentResult.parsed.summary,
   });
   return VerdictSchema.parse({
     brand: req.brand_name,
     applicant: req.applicant_name,
-    verdict: agentResult.parsed.verdict,
+    verdict,
     overall_confidence: finalConfidence,
     ml,
     applicant_history: applicantHistory,
@@ -241,7 +249,7 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
     policies: agentResult.parsed.policies,
     tools_used: [...new Set([...preTools, ...agentResult.toolsUsed])],
     trace: [...preTrace, ...agentResult.trace],
-    summary: agentResult.parsed.summary || `Agent verdict: ${agentResult.parsed.verdict}.`,
+    summary: agentResult.parsed.summary || `Agent verdict: ${verdict}.`,
     checked_at: now.toISOString(),
   });
 }
