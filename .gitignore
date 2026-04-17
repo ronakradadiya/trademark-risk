@@ -48,3 +48,6 @@ catboost_info/
 .vscode/
 *.swp
 *.swo
+
+# Claude Code local state
+.claude/
