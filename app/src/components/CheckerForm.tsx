@@ -20,6 +20,14 @@ const PRESETS: Preset[] = [
     },
   },
   {
+    label: 'Safetykit + XBox',
+    tagline: 'clean filer, famous-mark collision',
+    request: {
+      brand_name: 'XBox',
+      applicant_name: 'Safetykit Inc.',
+    },
+  },
+  {
     label: 'Leo Stoller + EZ Profits',
     tagline: 'famous troll filer',
     request: {
