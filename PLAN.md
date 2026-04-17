@@ -1,6 +1,6 @@
 # TrademarkRisk — Plan & Status
 
-Last updated: 2026-04-13
+Last updated: 2026-04-17
 
 ## What this is
 
@@ -25,10 +25,9 @@ trademark-risk/
 │   ├── src/
 │   │   ├── app/api/check/        POST /api/check route
 │   │   ├── lib/
-│   │   │   ├── agent.ts          ReAct loop + verdict blending
+│   │   │   ├── agent.ts          ReAct loop + deterministic verdict from policies
 │   │   │   ├── classifier.ts     ONNX session + 13-feature inference
 │   │   │   ├── features.ts       applicantToFeatures + markFeaturesFromPriorArt
-│   │   │   ├── rules.ts          deterministic hard-rule overlay (R1–R4)
 │   │   │   ├── policies.ts       the 5 policy definitions
 │   │   │   ├── check.ts          HTTP→agent orchestration
 │   │   │   ├── uspto_db.ts       better-sqlite3 read-only DB handle
@@ -38,18 +37,20 @@ trademark-risk/
 │   ├── scripts/
 │   │   ├── ingest_uspto.ts       builds data/uspto.sqlite from TRTYRAP XML
 │   │   └── smoke_tools.ts        tool-level smoke harness
-│   └── src/**/__tests__/         47 tests across schemas/tools/core/check
+│   └── src/**/__tests__/         70 tests across schemas/tools/core/check
 ├── ml/                           Python — training only, not imported at runtime
 │   ├── src/
 │   │   ├── build_from_sqlite.py  replaces TCFD ingest; writes processed features
-│   │   ├── train.py              LR/XGB/LGBM/CatBoost individual training
-│   │   ├── ensemble.py           v4 stack + ONNX export + parity check
+│   │   ├── train.py              single XGBoost training + ONNX export
 │   │   └── compare_models.py     production-fidelity gate (old vs new)
 │   ├── data/
 │   │   ├── raw/ttab/             TTAB fraud label provenance (kept)
 │   │   └── processed/            features_train/val/test.csv + labeled.csv
-│   ├── models/                   ONNX + joblib artifacts + MODEL_CARD.md
+│   ├── models/                   xgboost.onnx + xgboost.joblib + MODEL_CARD.md
 │   └── models_v4_old/            pre-retrain backup, used by compare_models.py
+├── infra/                        AWS CDK — ECR repo + t4g.small EC2 + SSM params
+├── worker/                       Cloudflare Worker — HTTPS proxy in front of EC2
+├── Dockerfile                    multi-stage build; bakes ml/models into the image
 └── data/uspto.sqlite             12.5M marks, 5M applicants — TRTYRAP April 2026
 ```
 
@@ -68,11 +69,13 @@ trademark-risk/
   label set — regenerable without re-downloading any CSVs.
 - TCFD CSVs deleted after labels were baked. 14.5 GB freed.
 
-### ML model — v4 stacking ensemble, 13 features
+### ML model — v4 single XGBoost, 13 features
 
-Architecture: `xgboost` + `catboost` → Logistic Regression meta-learner.
-Unchanged from the prior v4 design; what changed is the feature set and the
-training data.
+Architecture: one `xgboost` classifier exported as ONNX. An earlier iteration
+stacked XGBoost + CatBoost through a Logistic Regression meta-learner; the
+stack added +0.001 AUC over single XGBoost (inside measurement noise) so the
+meta-LR and CatBoost head were dropped. Both base models were gradient-boosted
+trees, so the diversity premise that motivates stacking never applied.
 
 **Training data:** 64,003 rows from April 2026 SQLite, 25% positive class,
 stratified across filing years 2000–2024. Labels join TTAB serials against
@@ -121,31 +124,41 @@ entirely. Full writeup in [ml/models/MODEL_CARD.md](ml/models/MODEL_CARD.md).
 ### Serving runtime
 
 Every request flows `api/check/route.ts → lib/check.ts → lib/agent.ts` and
-passes through four layers whose outputs are combined, not short-circuited
-(except at the extremes):
+passes through three layers whose outputs are combined, not short-circuited
+(except at the ML extreme):
 
 1. **Pre-resolve applicant history.** `resolveApplicantHistory()` runs the
    `lookup_applicant_history` tool first. Its output feeds both the ML layer
    (via `applicantToFeatures`) and the agent (via a one-line `historyLine`
    in the user message). Emitted as synthetic trace step 0.
 
-2. **Deterministic rule overlay.** `evaluateHardRules()` in
-   [app/src/lib/rules.ts](app/src/lib/rules.ts) checks 4 hard-coded filer
-   patterns against `ApplicantHistory`. If any rule fires, the request
-   short-circuits to `high_risk` with `source: 'rule_override'`. This runs
-   *before* the ML and agent layers because some patterns are beyond
-   reasonable doubt and we don't want the LLM to second-guess them.
-
-3. **ML filer-risk layer.** `lib/classifier.ts` runs the 13-feature v4 ONNX
-   stack. `ml.score > 0.85` short-circuits to `high_risk` with
+2. **ML filer-risk layer.** `lib/classifier.ts` runs the 13-feature v4 ONNX
+   model. `ml.score > 0.85` short-circuits to `high_risk` with
    `source: 'ml_only'`. There is no low short-circuit — every non-high
-   request runs the agent.
+   request runs the agent. (An earlier iteration had a deterministic hard-rule
+   overlay in `lib/rules.ts` that fired before this layer; the rules were
+   lifted into LLM policies P2/P4 where they're easier to reason about and
+   the behavior is inspectable via `policies[*].reason` instead of an opaque
+   `rule_override` source.)
 
-4. **Agent layer.** GPT-4o ReAct loop with 4 tools (`check_uspto_marks`,
+3. **Agent layer.** GPT-4o ReAct loop with 4 tools (`check_uspto_marks`,
    `check_domain_age`, `web_search`, `lookup_applicant_history`) and 5
-   policies. Returns `PolicyBundle` + verdict + summary.
+   policies. The LLM produces per-policy `{triggered, confidence, reason}`
+   and a natural-language `summary`. The **overall verdict label is not
+   LLM-chosen** — it's derived deterministically from the policy bundle:
 
-**Final blend:** `overall_confidence = ml.score * 0.35 + agent.overall_confidence * 0.65`.
+   ```
+   score = Σ (2 if conf ≥ 0.8 else 1) over triggered policies
+   verdict = safe   if 0 triggered
+           = high_risk if score ≥ 4
+           = review  otherwise
+   ```
+
+   This eliminates the "all 5 policies green but verdict = review" class of
+   inconsistency the LLM was prone to.
+
+**Final blend:** `overall_confidence = ml.score * 0.35 + agent.overall_confidence * 0.65`
+(label-independent; purely a display signal).
 
 ### Schema contract
 
@@ -162,7 +175,7 @@ discriminator in `executeTool`. Adding a tool requires: (1) entry in
 
 ### Tests
 
-47 tests in 4 suites, all passing:
+70 tests in 4 suites, all passing:
 - `test:schemas` — Zod contracts
 - `test:tools` — tool wrappers + fetch mocks
 - `test:core` — classifier loading + agent loop with fake OpenAI/classifier
@@ -174,10 +187,32 @@ no Jest / Vitest.
 
 ### End-to-end verified
 
-- `curl /api/check NovaPay/Meridian Labs` → `rule_override` fires correctly
-  (R1+R2+R3 — pro se burst filer pattern). ml.score = 0.024.
-- `curl /api/check BrewBox/BrewBox Holdings` → full 4-tool agent loop runs,
-  returns `review`, ml.score = 0.023, blended overall_confidence = 0.50.
+- **Nike Inc. / "Nike Runners"** → 0 policies triggered, `safe`. ML filer
+  score 0.005. Established owner, same-class line extension.
+- **Apple Inc. / "AirPods Pro"** → 0 policies triggered, `safe`. ML filer
+  score 0.005.
+- **Leo Stoller / "EZ Profits"** → P2@0.98 + P5@0.81 both triggered as
+  strong (score = 4) → `high_risk`. ML filer score 0.01 because Stoller's
+  2000+ filings are spread across shell entities (Rentamark, Central Mfg,
+  Stealth Industries), which don't aggregate under "Leo Stoller" in the
+  SQLite `applicants` rollup — the troll signal is reputational and comes
+  from `web_search`, not behavioral history.
+- **I420 LLC / "LA420"** → real shell-LLC filer, ML + agent converge on
+  `high_risk`.
+
+### Serving infrastructure
+
+- **Live at https://trademark-risk.raradadi.workers.dev** (HTTPS).
+- **Backend:** Docker container on a t4g.small EC2 (`i-08f9880a011703296`,
+  IP 34.224.242.26), pulled from ECR, restarted via SSM `send-command`.
+  Provisioned by the CDK stack in [infra/](infra/).
+- **HTTPS front:** Cloudflare Worker in [worker/](worker/) proxies every
+  request to `http://34-224-242-26.nip.io` (magic-DNS sidesteps CF error
+  1003 on raw IPs). Free tier, 100k requests/day. No domain purchased, no
+  ACM cert managed.
+- **Secrets:** `OPENAI_API_KEY`, `SERPER_API_KEY`, `OPENAI_MODEL` stored in
+  SSM Parameter Store; the restart script pulls them at container start and
+  passes them via `-e` env inheritance.
 
 ## Known limitations
 
@@ -199,10 +234,6 @@ These are honest gaps, not nice-to-haves:
   inversions. Explainable (megafiler dominance in the legit class) but it
   means the model learns the decision boundary in interaction, not in
   isolation.
-- **LR baseline ~4 points behind the stack** (0.787 vs 0.828 AUC). Modest
-  lift from the full xgb+cat+LR architecture, which suggests the feature
-  set is close to linearly separable and the stacking complexity is not
-  fully earning its keep.
 - **Single static artifact swap, no canary / shadow deployment.**
 - **No drift monitoring.** If TRTYRAP schema changes or the TTAB join rate
   drops over time, nothing alerts.
@@ -266,11 +297,6 @@ close this gap, and they should be built together:
 - **Drift monitor.** Weekly job that re-runs `compare_models.py` against a
   fresh SQLite snapshot and posts the AUC/Brier delta. Alert if either
   drops more than 0.02 versus the shipped artifact.
-- **Extend rule overlay with R5 (high attorney cancellation rate).** Current
-  rules (R1–R4) fire on pro-se burst patterns. The TTAB data shows clustered
-  cancellations concentrated under a handful of repeat attorneys who don't
-  trigger R1 because they have counsel of record. Worth encoding.
-
 ### Tier 2 — would improve the product story
 
 - **Confidence calibration on the blended score.** The 0.35/0.65 ML↔agent
@@ -297,9 +323,6 @@ close this gap, and they should be built together:
   → ensemble.py → compare_models.py` chain behind a single CI job gated on
   the comparison script's exit code. Only promotes artifacts if the gate
   passes.
-- **CDK deployment.** The app runs locally against `.env.local`. Wire up
-  the Next build to a Lambda + CloudFront or ECS Fargate target with the
-  ONNX files baked into the deployment artifact.
 - **DynamoDB audit index.** The audit store writes work but there's no
   secondary index for "list recent verdicts by applicant." Add a GSI on
   `applicant_name_norm` so the admin UI can pull a filer's history across
