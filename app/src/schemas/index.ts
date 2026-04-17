@@ -147,3 +147,12 @@ export const AuditRecordSchema = VerdictSchema.extend({
   ttl: z.number().int().positive(),
 });
 export type AuditRecord = z.infer<typeof AuditRecordSchema>;
+
+export const ProgressEventSchema = z.object({
+  kind: z.enum(['stage', 'tool', 'verdict', 'error']),
+  label: z.string().min(1),
+  status: z.enum(['started', 'completed', 'failed']),
+  detail: z.string().optional(),
+  data: z.unknown().optional(),
+});
+export type ProgressEvent = z.infer<typeof ProgressEventSchema>;

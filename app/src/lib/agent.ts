@@ -11,6 +11,7 @@ import {
   type AgentStep,
   type ToolName,
   type ApplicantHistory,
+  type ProgressEvent,
   POLICY_KEYS,
 } from '../schemas/index.js';
 import { POLICIES, POLICY_LIST } from './policies.js';
@@ -34,6 +35,8 @@ export interface AgentDeps {
   applicantHistory?: ApplicantHistory;
   /** Test hook to inject feature overrides after history extraction. */
   featureOverrides?: Partial<FeatureVector>;
+  /** Optional streaming callback fired at each stage + tool boundary. */
+  onProgress?: (event: ProgressEvent) => void;
   tools?: Partial<{
     lookup_applicant_history: typeof lookupApplicantHistory;
     check_uspto_marks: typeof checkUsptoMarks;
@@ -152,8 +155,19 @@ function parseAgentJson(raw: string): ParsedAgentJson {
 export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<Verdict> {
   const req = CheckRequestSchema.parse(request);
   const now = (deps.now ?? (() => new Date()))();
+  const emit = deps.onProgress ?? (() => {});
 
+  emit({ kind: 'stage', label: `Looking up ${req.applicant_name} in USPTO history`, status: 'started' });
   const applicantHistory = await resolveApplicantHistory(req, deps);
+  emit({
+    kind: 'stage',
+    label: applicantHistory.found
+      ? `Applicant found — ${applicantHistory.filing_count_total} filings, ${applicantHistory.filing_count_2yr} in last 24mo, ${(applicantHistory.abandonment_rate * 100).toFixed(0)}% abandoned`
+      : `Applicant not found in USPTO — treating as first-time filer`,
+    status: 'completed',
+    data: applicantHistory,
+  });
+
   let markFeatures: Partial<FeatureVector>;
   try {
     markFeatures = markFeaturesFromPriorArt(req.brand_name, req.class_code);
@@ -167,7 +181,14 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
     ...(deps.featureOverrides ?? {}),
   } as FeatureVector;
 
+  emit({ kind: 'stage', label: 'Scoring filer-risk with ML ranker', status: 'started' });
   const ml: MLPrediction = await deps.classifier.predict(features);
+  emit({
+    kind: 'stage',
+    label: `ML score ${ml.score.toFixed(3)} (${ml.tier} tier)`,
+    status: 'completed',
+    data: ml,
+  });
 
   const preTrace: AgentStep[] = [
     {
@@ -183,6 +204,7 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
 
   if (ml.score > AGENT_HIGH) {
     const reason = `Filer risk score ${ml.score.toFixed(3)} exceeds high-risk threshold ${AGENT_HIGH} — abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, ${applicantHistory.filing_count_2yr} filings in 24mo.`;
+    emit({ kind: 'stage', label: 'Short-circuit: ML score above high-risk threshold — skipping agent', status: 'completed' });
     return VerdictSchema.parse({
       brand: req.brand_name,
       applicant: req.applicant_name,
@@ -202,6 +224,12 @@ export async function runCheck(request: CheckRequest, deps: AgentDeps): Promise<
   const agentResult = await runAgentLoop(req, ml, applicantHistory, deps);
 
   const finalConfidence = ml.score * 0.35 + agentResult.parsed.overall_confidence * 0.65;
+  emit({
+    kind: 'verdict',
+    label: `Verdict: ${agentResult.parsed.verdict.replace('_', ' ')}`,
+    status: 'completed',
+    detail: agentResult.parsed.summary,
+  });
   return VerdictSchema.parse({
     brand: req.brand_name,
     applicant: req.applicant_name,
@@ -250,6 +278,28 @@ interface AgentRunResult {
   toolsUsed: ToolName[];
 }
 
+function buildToolLabel(name: ToolName, args: Record<string, unknown>): string {
+  switch (name) {
+    case 'check_uspto_marks': {
+      const brand = String(args.brand_name ?? '').trim();
+      const cls = typeof args.class_code === 'number' ? ` (class ${args.class_code})` : '';
+      return `Searching USPTO for "${brand}"${cls}`;
+    }
+    case 'check_domain_age': {
+      const domain = String(args.domain_name ?? '').trim();
+      return `Checking domain age for ${domain}`;
+    }
+    case 'web_search': {
+      const q = String(args.query ?? '').trim();
+      return `Web searching: ${q}`;
+    }
+    case 'lookup_applicant_history':
+      return 'Looking up applicant history';
+    default:
+      return `Calling ${name}`;
+  }
+}
+
 async function runAgentLoop(
   req: CheckRequest,
   ml: MLPrediction,
@@ -258,6 +308,7 @@ async function runAgentLoop(
 ): Promise<AgentRunResult> {
   const client = deps.openai ?? new OpenAI();
   const model = deps.model ?? DEFAULT_MODEL;
+  const emit = deps.onProgress ?? (() => {});
 
   const historyLine = applicantHistory.found
     ? `Applicant history: ${applicantHistory.filing_count_total} total filings, ${applicantHistory.filing_count_2yr} in last 24mo, abandonment ${(applicantHistory.abandonment_rate * 100).toFixed(0)}%, cancellation ${(applicantHistory.cancellation_rate * 100).toFixed(0)}%, individual=${applicantHistory.is_individual}, foreign=${applicantHistory.is_foreign}, attorney=${applicantHistory.attorney_of_record ?? 'none/pro se'}`
@@ -283,6 +334,8 @@ async function runAgentLoop(
   const trace: AgentStep[] = [];
   const toolsUsed: ToolName[] = [];
 
+  emit({ kind: 'stage', label: 'Agent investigating', status: 'started' });
+
   for (let step = 0; step < MAX_AGENT_STEPS; step++) {
     const response = await client.chat.completions.create({
       model,
@@ -301,6 +354,9 @@ async function runAgentLoop(
         if (call.type !== 'function') continue;
         const name = call.function.name as ToolName;
         const args = safeJsonParse(call.function.arguments);
+        const argsObj = (args ?? {}) as Record<string, unknown>;
+        const label = buildToolLabel(name, argsObj);
+        emit({ kind: 'tool', label, status: 'started' });
         const started = Date.now();
         const result = await executeTool(name, args, deps);
         trace.push({
@@ -312,6 +368,13 @@ async function runAgentLoop(
           duration_ms: Date.now() - started,
         });
         toolsUsed.push(name);
+        emit({
+          kind: 'tool',
+          label,
+          status: result.ok ? 'completed' : 'failed',
+          detail: result.ok ? undefined : result.error.message,
+          data: result.ok ? result.data : result.error,
+        });
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
@@ -322,6 +385,7 @@ async function runAgentLoop(
     }
 
     const content = msg.content ?? '';
+    emit({ kind: 'stage', label: 'Composing verdict', status: 'completed' });
     const parsed = parseAgentJson(content);
     return { parsed, trace, toolsUsed };
   }

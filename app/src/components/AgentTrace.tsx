@@ -1,19 +1,39 @@
 'use client';
 
-import type { AgentStep } from '../schemas/index.js';
+import type { AgentStep, ProgressEvent } from '../schemas/index.js';
 
 interface Props {
   trace: AgentStep[];
+  progress: ProgressEvent[];
   loading: boolean;
 }
 
-export function AgentTrace({ trace, loading }: Props) {
-  if (!loading && trace.length === 0) return null;
+function statusIcon(status: ProgressEvent['status']): string {
+  if (status === 'completed') return '✓';
+  if (status === 'failed') return '✗';
+  return '⋯';
+}
+
+export function AgentTrace({ trace, progress, loading }: Props) {
+  const hasProgress = progress.length > 0;
+  if (!loading && trace.length === 0 && !hasProgress) return null;
 
   return (
     <section className="panel">
       <h2>Agent trace</h2>
-      {loading && trace.length === 0 ? (
+      {hasProgress ? (
+        <div>
+          {progress.map((ev, i) => (
+            <div key={i} className={`trace-item trace-${ev.kind} status-${ev.status}`}>
+              <span className="trace-icon">{statusIcon(ev.status)}</span>
+              <span className="trace-kind">{ev.kind}</span>
+              <span className="trace-label"> — {ev.label}</span>
+              {ev.detail ? <span className="trace-detail"> · {ev.detail}</span> : null}
+            </div>
+          ))}
+          {loading ? <div className="empty">Investigating…</div> : null}
+        </div>
+      ) : loading ? (
         <div className="empty">Investigating…</div>
       ) : (
         <div>
