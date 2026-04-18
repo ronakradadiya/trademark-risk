@@ -51,3 +51,6 @@ catboost_info/
 
 # Claude Code local state
 .claude/
+
+# Internal planning doc — not for public repo
+PLAN.md

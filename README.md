@@ -181,8 +181,6 @@ copy.
   the old one immediately. There's no gradual rollout, no automatic alarm
   if accuracy drops, no shadow run to compare old vs. new on live traffic.
 
-Full roadmap and future scope in [PLAN.md](PLAN.md).
-
 ## Key files to read
 
 - [app/src/lib/agent.ts](app/src/lib/agent.ts) — ReAct loop, tool
