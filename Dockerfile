@@ -6,6 +6,11 @@ WORKDIR /src/app
 COPY app/package.json app/package-lock.json ./
 RUN npm ci
 COPY app ./
+# NEXT_PUBLIC_* vars are inlined at build time, so pass them in here.
+ARG NEXT_PUBLIC_POSTHOG_KEY
+ARG NEXT_PUBLIC_POSTHOG_HOST
+ENV NEXT_PUBLIC_POSTHOG_KEY=$NEXT_PUBLIC_POSTHOG_KEY \
+    NEXT_PUBLIC_POSTHOG_HOST=$NEXT_PUBLIC_POSTHOG_HOST
 RUN npm run build
 
 FROM node:24-slim AS runner

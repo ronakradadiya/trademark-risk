@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import './globals.css';
+import { PostHogProvider } from '../components/PostHogProvider';
 
 export const metadata = {
   title: 'Trademark Risk Check',
@@ -9,7 +10,9 @@ export const metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <PostHogProvider>{children}</PostHogProvider>
+      </body>
     </html>
   );
 }
