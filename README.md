@@ -159,7 +159,7 @@ Building `data/uspto.sqlite` locally requires the TRTYRAP XML dumps
 (~40 min on an M-series laptop). The deployed image ships with a prebuilt
 copy.
 
-## Honest limitations
+## Limitations
 
 - **The ML can't see famous trolls with only one filing.** Leo Stoller has
   filed 2,000+ marks in his career, but spread across shell companies
